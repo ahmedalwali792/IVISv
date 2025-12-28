@@ -1,0 +1,71 @@
+# ------------------------------------------------------------------------------
+# FILE: infrastructure/bus.py
+# ------------------------------------------------------------------------------
+import socket
+import threading
+
+# ==============================================================================
+# DEV-ONLY MESSAGE BUS
+#
+# ⚠️ This Bus is NOT part of v1 architecture invariants.
+# It is non-contractual infrastructure used for local development only.
+# Any changes here do NOT affect Frozen v1 guarantees.
+# ==============================================================================
+
+class SimpleBus:
+    """
+    TCP Message Broker بسيط جداً لمرحلة التطوير.
+    """
+    def __init__(self, host='0.0.0.0', port=5555):
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server.bind((host, port))
+        self.server.listen(5)
+        self.clients = []
+        self.running = True
+        print(f"[BUS] Listening on {host}:{port}")
+
+    def broadcast(self, sender_socket, message):
+        for client in self.clients:
+            if client != sender_socket:
+                try:
+                    client.sendall(message)
+                except:
+                    self.remove(client)
+
+    def remove(self, connection):
+        if connection in self.clients:
+            self.clients.remove(connection)
+
+    def handle_client(self, conn, addr):
+        print(f"[BUS] New connection: {addr}")
+        self.clients.append(conn)
+        while self.running:
+            try:
+                data = conn.recv(4096)
+                if not data:
+                    break
+                self.broadcast(conn, data)
+            except:
+                break
+        self.remove(conn)
+        conn.close()
+
+    def start(self):
+        while self.running:
+            try:
+                conn, addr = self.server.accept()
+                thread = threading.Thread(target=self.handle_client, args=(conn, addr))
+                thread.daemon = True
+                thread.start()
+            except KeyboardInterrupt:
+                self.stop()
+                break
+
+    def stop(self):
+        self.running = False
+        self.server.close()
+
+if __name__ == "__main__":
+    bus = SimpleBus()
+    bus.start()
