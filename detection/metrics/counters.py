@@ -1,5 +1,4 @@
-# FILE: detection/metrics/counters.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] detection/metrics/counters.py
 class Metrics:
     def __init__(self):
         self.frames_received = 0

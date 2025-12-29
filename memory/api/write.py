@@ -1,7 +1,5 @@
-# FILE: memory/api/write.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] memory/api/write.py
 from memory.backend.base import MemoryBackend
-
 
 class WriteAPI:
     def __init__(self, backend: MemoryBackend):

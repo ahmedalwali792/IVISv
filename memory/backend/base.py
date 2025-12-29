@@ -1,5 +1,4 @@
-# FILE: memory/backend/base.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] memory/backend/base.py
 from abc import ABC, abstractmethod
 from typing import Optional, Any
 

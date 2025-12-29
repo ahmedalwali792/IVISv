@@ -1,5 +1,4 @@
-# FILE: memory/buffer/index.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] memory/buffer/index.py
 from dataclasses import dataclass
 from typing import Optional
 

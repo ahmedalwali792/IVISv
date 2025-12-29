@@ -1,5 +1,4 @@
-# FILE: detection/errors/fatal.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] detection/errors/fatal.py
 class FatalError(Exception):
     def __init__(self, message, context=None):
         self.message = message

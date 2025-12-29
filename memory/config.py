@@ -1,7 +1,5 @@
-# FILE: memory/config.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] memory/config.py
 import os
-
 from memory.errors.fatal import ConfigurationError
 
 class Config:
@@ -26,6 +24,7 @@ class Config:
             raise ConfigurationError(f"Buffer size too small.")
         if self.backend_type != "ring":
              raise ConfigurationError(f"Fatal: Only 'ring' backend is supported.")
+
 try:
     config = Config()
 except ConfigurationError:

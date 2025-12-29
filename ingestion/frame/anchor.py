@@ -1,5 +1,4 @@
-# FILE: ingestion/frame/anchor.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] ingestion/frame/anchor.py
 import cv2
 import numpy as np
 

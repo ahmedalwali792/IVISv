@@ -1,6 +1,4 @@
-# ------------------------------------------------------------------------------
-# FILE: ingestion/metrics/counters.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] ingestion/metrics/counters.py
 class Metrics:
     def __init__(self):
         self.frames_captured = 0

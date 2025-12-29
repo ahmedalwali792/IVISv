@@ -1,5 +1,4 @@
-# FILE: ingestion/frame/id.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] ingestion/frame/id.py
 import hashlib
 
 class FrameIdentity:

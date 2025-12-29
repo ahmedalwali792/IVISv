@@ -1,5 +1,4 @@
-# FILE: detection/preprocess/tensorize.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] detection/preprocess/tensorize.py
 import numpy as np
 
 def to_model_input(frame_data: np.ndarray) -> np.ndarray:

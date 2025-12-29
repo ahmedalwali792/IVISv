@@ -1,5 +1,4 @@
-# FILE: ingestion/memory/ref.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] ingestion/memory/ref.py
 class MemoryReference:
     def __init__(self, location, size, backend_type, generation=0):
         self.location = location

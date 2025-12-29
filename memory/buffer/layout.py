@@ -1,5 +1,4 @@
-# FILE: memory/buffer/layout.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] memory/buffer/layout.py
 from dataclasses import dataclass
 
 @dataclass(frozen=True)

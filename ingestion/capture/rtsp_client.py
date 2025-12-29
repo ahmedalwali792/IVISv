@@ -1,7 +1,6 @@
-# FILE: ingestion/capture/rtsp_client.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] ingestion/capture/rtsp_client.py
 import cv2
-from ingestion.errors.fatal import FatalError  # ✅ FIX: Missing Import Added
+from ingestion.errors.fatal import FatalError
 
 class RTSPClient:
     def __init__(self, url):
@@ -28,5 +27,3 @@ class RTSPClient:
     def close(self):
         if self.cap:
             self.cap.release()
-
-# ---------

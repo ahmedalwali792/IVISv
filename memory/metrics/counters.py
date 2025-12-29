@@ -1,5 +1,4 @@
-# FILE: memory/metrics/counters.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] memory/metrics/counters.py
 class Metrics:
     _instance = None
     def __init__(self):

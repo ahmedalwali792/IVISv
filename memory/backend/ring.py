@@ -1,15 +1,11 @@
-# FILE: memory/backend/ring.py
-# ------------------------------------------------------------------------------
-from typing import Union
-
-from typing import Optional
-
+# [2025-12-29] memory/backend/ring.py
+from typing import Optional, Union
 from memory.backend.base import MemoryBackend
+from memory.errors.fatal import BackendInitializationError
 from memory.buffer.allocator import RingAllocator
 from memory.buffer.index import BufferIndex
-from memory.buffer.layout import MemoryReference
-from memory.errors.fatal import BackendInitializationError
 from memory.metrics.counters import Metrics
+from memory.buffer.layout import MemoryReference
 
 class RingBufferBackend(MemoryBackend):
     name = "ring_v1"

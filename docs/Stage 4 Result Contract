@@ -1,0 +1,40 @@
+Result Output Contract (Frozen v1.0)
+
+This document defines the ONLY permissible output format for the Result Plane.
+Any deviation is a contract violation.
+
+1. JSON Structure (Strict)
+
+{
+  "frame_id": "string (UUID or Hash)",
+  "timestamp": "int (Unix ms)",
+  "detections": [
+    {
+      "class_id": "int",
+      "confidence": "float (0.0 - 1.0)",
+      "bbox": [x, y, w, h]  // integers, absolute pixels
+    }
+  ],
+  "model": {
+    "name": "string",
+    "version": "string",
+    "hash": "string"
+  }
+}
+
+
+2. Rules
+
+detections: Can be empty list []. Must never be null.
+
+bbox: Must be strictly [x, y, w, h]. No [x1, y1, x2, y2].
+
+No Versioning: The schema is fixed for v1. No v field.
+
+No Extensibility: Extra fields in detections are ignored/dropped.
+
+3. Authority
+
+Producer: Detection Service (Sole Authority).
+
+Consumer: Result Plane (Read-Only).

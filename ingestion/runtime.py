@@ -1,5 +1,4 @@
-
-# FILE: ingestion/runtime.py
+# [2025-12-29] ingestion/runtime.py
 import signal
 
 class Runtime:

@@ -1,0 +1,31 @@
+Stage 4 Architectural Invariants (Frozen)
+
+1. Failure Boundary (Detection ↔ Result Plane)
+
+Rule: Failure in Result Plane does not propagate upstream.
+
+Implication:
+
+If ResultConsumer dies, Detection MUST NOT crash, stall, or buffer.
+
+Detection fires messages to the Bus and forgets them (Fire-and-Forget).
+
+Detection must never depend on Result Plane liveness.
+
+2. Infrastructure Status (The Bus)
+
+Status: DEV-ONLY COMPONENT.
+
+Definition: SimpleBus (infrastructure/bus.py) is a development convenience tool, not a production message broker.
+
+Roadmap: It is explicitly scheduled to be replaced completely in Stage 5.
+
+Prohibition: Do not build reliability, persistence, or ordering logic on top of SimpleBus.
+
+3. Closure
+
+Stage 4 Status: CLOSED.
+
+Visual Output: Local Dashboard / JSONL Logs.
+
+No Hidden Debt: All components operate within defined failure domains.

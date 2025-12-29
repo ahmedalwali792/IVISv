@@ -1,5 +1,4 @@
-# FILE: ingestion/frame/normalizer.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] ingestion/frame/normalizer.py
 import cv2
 
 class Normalizer:

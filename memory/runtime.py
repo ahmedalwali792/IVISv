@@ -1,11 +1,7 @@
-# FILE: memory/runtime.py
-# ------------------------------------------------------------------------------
-
-from memory.config import config
+# [2025-12-29] memory/runtime.py
+from memory.config import Config, ConfigurationError, config
 from memory.backend.ring import RingBufferBackend
-from memory.errors.fatal import ConfigurationError, BackendInitializationError
-from memory.errors.fatal import ConfigurationError
-
+from memory.errors.fatal import BackendInitializationError
 
 class Runtime:
     def __init__(self):

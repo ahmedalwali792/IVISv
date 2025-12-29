@@ -1,7 +1,5 @@
-# FILE: memory/buffer/allocator.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] memory/buffer/allocator.py
 from memory.buffer.layout import AllocationResult
-
 
 class RingAllocator:
     def __init__(self, buffer_capacity: int):

@@ -1,5 +1,4 @@
-# FILE: ingestion/frame/selector.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] ingestion/frame/selector.py
 class Selector:
     def __init__(self, target_fps):
         self.target_fps = target_fps

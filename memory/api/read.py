@@ -1,7 +1,5 @@
-# FILE: memory/api/read.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] memory/api/read.py
 from typing import Optional
-
 from memory.backend.base import MemoryBackend
 from memory.buffer.layout import MemoryReference
 

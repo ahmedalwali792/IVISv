@@ -1,14 +1,10 @@
-# FILE: memory/server.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] memory/server.py
 import http.server
 import socketserver
 import sys
 import os
 import json
-
 from memory.runtime import Runtime
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Global Init - If this fails, script dies (Stage 2 compliant)
 try:

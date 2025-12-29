@@ -1,7 +1,5 @@
-# FILE: memory/api/health.py
-# ------------------------------------------------------------------------------
+# [2025-12-29] memory/api/health.py
 from memory.backend.base import MemoryBackend
-
 
 class HealthAPI:
     def __init__(self, backend: MemoryBackend):
