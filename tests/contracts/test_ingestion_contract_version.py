@@ -15,7 +15,8 @@ def test_ingestion_builds_contract_version_int():
         stream_id="s1",
         camera_id="c1",
         frame_identity=identity,
-        packet_timestamp=1000,
+        packet_timestamp_ms=1000,
+        packet_mono_ms=2000,
         memory_ref=DummyMemoryRef(),
         gen=1,
         frame_width=640,
@@ -24,3 +25,5 @@ def test_ingestion_builds_contract_version_int():
     )
     assert contract["contract_version"] == 1
     assert isinstance(contract["contract_version"], int)
+    assert contract["timestamp_ms"] == 1000
+    assert contract["mono_ms"] == 2000

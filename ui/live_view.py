@@ -357,8 +357,8 @@ def _handle_contract(contract: dict):
     else:
         # Ensure result is recent relative to this frame's timestamp
         try:
-            res_ts = int(result.get("timestamp", 0))
-            frame_ts = int(contract.get("timestamp", 0))
+            res_ts = int(result.get("timestamp_ms", 0))
+            frame_ts = int(contract.get("timestamp_ms", 0))
             max_age_ms = int(os.getenv("MAX_RESULT_AGE_MS", "500"))
             if abs(res_ts - frame_ts) > max_age_ms:
                 detection_metrics.inc_dropped_reason("result_lag")

@@ -12,7 +12,8 @@ def base_contract():
         "stream_id": "s1",
         "camera_id": "c1",
         "pts": 0.0,
-        "timestamp": 1000,
+        "timestamp_ms": 1000,
+        "mono_ms": 2000,
         "memory": {"backend": "shm", "key": "1", "size": 640 * 480 * 3, "generation": 1},
         "frame_width": 640,
         "frame_height": 480,
@@ -54,12 +55,28 @@ def test_missing_frame_id_triggers_error():
     assert exc.value.reason_code == "bad_frame_id"
 
 
-def test_wrong_timestamp_type_triggers_error():
+def test_missing_timestamp_ms_triggers_error():
     c = base_contract()
-    c["timestamp"] = "1000"
+    del c["timestamp_ms"]
     with pytest.raises(ContractValidationError) as exc:
         validate_frame_contract_v1(c)
-    assert exc.value.reason_code == "bad_timestamp"
+    assert exc.value.reason_code == "bad_timestamp_ms"
+
+
+def test_wrong_timestamp_ms_type_triggers_error():
+    c = base_contract()
+    c["timestamp_ms"] = "1000"
+    with pytest.raises(ContractValidationError) as exc:
+        validate_frame_contract_v1(c)
+    assert exc.value.reason_code == "bad_timestamp_ms"
+
+
+def test_wrong_mono_ms_type_triggers_error():
+    c = base_contract()
+    c["mono_ms"] = "2000"
+    with pytest.raises(ContractValidationError) as exc:
+        validate_frame_contract_v1(c)
+    assert exc.value.reason_code == "bad_mono_ms"
 
 
 @pytest.mark.parametrize("legacy_value", ["1", "v1", "V1"])

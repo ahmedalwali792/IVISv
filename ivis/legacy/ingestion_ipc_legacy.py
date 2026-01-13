@@ -33,13 +33,14 @@ class SocketPublisher:
         except Exception:
             self.sock = None
 
-    def publish(self, frame_identity, packet_timestamp, memory_ref):
+    def publish(self, frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref):
         gen = getattr(memory_ref, "generation", 0)
         contract = _build_contract(
             self.stream_id,
             self.camera_id,
             frame_identity,
-            packet_timestamp,
+            packet_timestamp_ms,
+            packet_mono_ms,
             memory_ref,
             gen,
             self.frame_width,
@@ -76,13 +77,14 @@ class ZmqPublisher:
         self.socket = self.zmq.Context.instance().socket(self.zmq.PUB)
         self.socket.connect(self.endpoint)
 
-    def publish(self, frame_identity, packet_timestamp, memory_ref):
+    def publish(self, frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref):
         gen = getattr(memory_ref, "generation", 0)
         contract = _build_contract(
             self.stream_id,
             self.camera_id,
             frame_identity,
-            packet_timestamp,
+            packet_timestamp_ms,
+            packet_mono_ms,
             memory_ref,
             gen,
             self.frame_width,
@@ -97,7 +99,8 @@ def _build_contract(
     stream_id,
     camera_id,
     frame_identity,
-    packet_timestamp,
+    packet_timestamp_ms,
+    packet_mono_ms,
     memory_ref,
     gen,
     frame_width,
@@ -118,7 +121,8 @@ def _build_contract(
         stream_id=stream_id,
         camera_id=camera_id,
         pts=frame_identity.pts,
-        timestamp=packet_timestamp,
+        timestamp_ms=packet_timestamp_ms,
+        mono_ms=packet_mono_ms,
         memory=memory,
         frame_width=frame_width,
         frame_height=frame_height,

@@ -37,8 +37,10 @@ def validate_result_contract_v1(result: Dict[str, Any]) -> None:
         if field not in result or not isinstance(result.get(field), str):
             raise ContractValidationError("missing_id_field", f"{field} must be a non-empty string")
 
-    if "timestamp" not in result or not isinstance(result.get("timestamp"), int):
-        raise ContractValidationError("bad_timestamp", "timestamp must be int (ms)")
+    if "timestamp_ms" not in result or not isinstance(result.get("timestamp_ms"), int):
+        raise ContractValidationError("bad_timestamp_ms", "timestamp_ms must be int (ms)")
+    if "mono_ms" not in result or not isinstance(result.get("mono_ms"), int):
+        raise ContractValidationError("bad_mono_ms", "mono_ms must be int (ms)")
 
     # detections
     dets = result.get("detections")

@@ -108,8 +108,10 @@ def validate_frame_contract_v1(contract: Dict[str, Any]) -> None:
     # pts/timestamp types
     if "pts" in contract and not isinstance(contract.get("pts"), (int, float)):
         raise ContractValidationError("bad_pts", "pts must be numeric")
-    if "timestamp" in contract and not isinstance(contract.get("timestamp"), int):
-        raise ContractValidationError("bad_timestamp", "timestamp must be int (ms)")
+    if "timestamp_ms" not in contract or not isinstance(contract.get("timestamp_ms"), int):
+        raise ContractValidationError("bad_timestamp_ms", "timestamp_ms must be int (ms)")
+    if "mono_ms" not in contract or not isinstance(contract.get("mono_ms"), int):
+        raise ContractValidationError("bad_mono_ms", "mono_ms must be int (ms)")
 
     # All checks passed
     return None

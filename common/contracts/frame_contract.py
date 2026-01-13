@@ -42,7 +42,8 @@ class FrameContractV1:
     stream_id: str
     camera_id: str
     pts: float
-    timestamp: int
+    timestamp_ms: int
+    mono_ms: int
     memory: FrameMemoryRef
     frame_width: int
     frame_height: int
@@ -77,9 +78,12 @@ class FrameContractV1:
         pts = payload.get("pts")
         if not isinstance(pts, (int, float)):
             raise ValueError("pts must be a number")
-        timestamp = payload.get("timestamp")
-        if not isinstance(timestamp, int):
-            raise ValueError("timestamp must be an int (ms)")
+        timestamp_ms = payload.get("timestamp_ms")
+        mono_ms = payload.get("mono_ms")
+        if not isinstance(timestamp_ms, int):
+            raise ValueError("timestamp_ms must be an int (ms)")
+        if not isinstance(mono_ms, int):
+            raise ValueError("mono_ms must be an int (ms)")
         memory = FrameMemoryRef.from_dict(payload.get("memory"))
         frame_width = payload.get("frame_width")
         frame_height = payload.get("frame_height")
@@ -102,7 +106,8 @@ class FrameContractV1:
             stream_id=stream_id,
             camera_id=camera_id,
             pts=float(pts),
-            timestamp=timestamp,
+            timestamp_ms=timestamp_ms,
+            mono_ms=mono_ms,
             memory=memory,
             frame_width=frame_width,
             frame_height=frame_height,
@@ -118,7 +123,8 @@ class FrameContractV1:
             "stream_id": self.stream_id,
             "camera_id": self.camera_id,
             "pts": self.pts,
-            "timestamp": self.timestamp,
+            "timestamp_ms": self.timestamp_ms,
+            "mono_ms": self.mono_ms,
             "memory": {
                 "backend": self.memory.backend,
                 "key": self.memory.key,

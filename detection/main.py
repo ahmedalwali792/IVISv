@@ -8,6 +8,7 @@ logger = setup_logging("detection")
 
 import ivis_metrics
 import ivis_tracing
+from ivis.common.time_utils import latency_ms, wall_clock_ms
 
 from detection.config import Config
 from detection.errors.fatal import FatalError, NonFatalError
@@ -81,8 +82,8 @@ def main():
 
                 # stale frame
                 if Config.MAX_FRAME_AGE_MS > 0:
-                    now_ms = int(time.time() * 1000)
-                    age_ms = now_ms - int(frame_contract.get("timestamp", now_ms))
+                    now_ms = wall_clock_ms()
+                    age_ms = latency_ms(now_ms, int(frame_contract.get("timestamp_ms", now_ms)))
                     if age_ms > Config.MAX_FRAME_AGE_MS:
                         metrics.inc_dropped()
                         try:
@@ -143,10 +144,10 @@ def main():
                     pass
 
                 try:
-                    ts = frame_contract.get("timestamp")
+                    ts = frame_contract.get("timestamp_ms")
                     if ts is not None:
-                        now_ms = time.time() * 1000.0
-                        e2e = now_ms - float(ts)
+                        now_ms = wall_clock_ms()
+                        e2e = latency_ms(now_ms, int(ts))
                         ivis_metrics.end_to_end_latency_ms.observe(e2e)
                 except Exception:
                     pass
