@@ -15,6 +15,7 @@ from memory.shm_ring import ShmRing
 from ivis.common.contracts.validators import validate_frame_contract_v1, ContractValidationError
 from ivis.common.contracts.result_contract import validate_result_contract_v1
 from detection.metrics.counters import metrics as detection_metrics
+from ui.results_cache import ResultsCache
 import ivis_metrics
 import ivis_tracing
 
@@ -39,10 +40,14 @@ FRAME_COLOR_SPACE = os.getenv("FRAME_COLOR_SPACE", "bgr").lower()
 app = Flask(__name__)
 logger = setup_logging("ui")
 
+RESULTS_CACHE_MAX = int(os.getenv("UI_RESULTS_CACHE_MAX", "2000"))
+RESULTS_CACHE_TTL_SEC = float(os.getenv("UI_RESULTS_CACHE_TTL_SEC", "60"))
+
 latest_lock = threading.Lock()
 latest_frame = None
 latest_meta = {}
-results_cache = {}
+results_cache = ResultsCache(max_entries=RESULTS_CACHE_MAX, ttl_seconds=RESULTS_CACHE_TTL_SEC)
+results_cache_lock = threading.Lock()
 shm_ring = None
 last_shm_error = None
 active_shm_name = None
@@ -53,6 +58,25 @@ last_result = {}
 last_shm_ts = 0.0
 _threads_started = False
 _threads_lock = threading.Lock()
+
+def _update_cache_metric():
+    try:
+        ivis_metrics.ui_results_cache_size.set(len(results_cache))
+    except Exception:
+        pass
+
+
+def _cache_set(frame_id: str, result: dict):
+    with results_cache_lock:
+        results_cache.put(frame_id, result)
+        _update_cache_metric()
+
+
+def _cache_get(frame_id: str):
+    with results_cache_lock:
+        result = results_cache.get(frame_id)
+        _update_cache_metric()
+        return result
 
 
 def _start_background_threads():
@@ -261,7 +285,7 @@ def _results_loop():
                             continue
                         frame_id = result.get("frame_id")
                         if frame_id:
-                            results_cache[frame_id] = result
+                            _cache_set(frame_id, result)
                             last_result = result
                     except Exception:
                         logger.exception("Failed to parse/handle result payload")
@@ -288,7 +312,7 @@ def _results_loop():
                             continue
                         frame_id = result.get("frame_id")
                         if frame_id:
-                            results_cache[frame_id] = result
+                            _cache_set(frame_id, result)
                             last_result = result
                     except Exception:
                         logger.exception("Failed to parse/handle result payload")
@@ -347,7 +371,7 @@ def _handle_contract(contract: dict):
     frame_id = contract.get("frame_id")
     # Prefer the exact ResultContractV1 for this frame_id; fall back to last_result only
     # if it's recent to avoid drawing stale tracks for long periods.
-    result = results_cache.get(frame_id)
+    result = _cache_get(frame_id)
     if result is None:
         # Use last_result only when it was updated within 0.5s
         if time.perf_counter() - last_shm_ts < float(os.getenv("MAX_RESULT_AGE_SEC", "0.5")):
