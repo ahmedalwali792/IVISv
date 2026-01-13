@@ -46,6 +46,22 @@ def test_size_mismatch_triggers_error():
     assert exc.value.reason_code == "memory_size_mismatch"
 
 
+def test_missing_frame_id_triggers_error():
+    c = base_contract()
+    del c["frame_id"]
+    with pytest.raises(ContractValidationError) as exc:
+        validate_frame_contract_v1(c)
+    assert exc.value.reason_code == "bad_frame_id"
+
+
+def test_wrong_timestamp_type_triggers_error():
+    c = base_contract()
+    c["timestamp"] = "1000"
+    with pytest.raises(ContractValidationError) as exc:
+        validate_frame_contract_v1(c)
+    assert exc.value.reason_code == "bad_timestamp"
+
+
 @pytest.mark.parametrize("legacy_value", ["1", "v1", "V1"])
 def test_contract_version_normalizes_legacy_strings(legacy_value):
     c = base_contract()

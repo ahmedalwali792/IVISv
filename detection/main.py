@@ -1,9 +1,15 @@
-# FILE: detection/main.py
-# ------------------------------------------------------------------------------
+#!/usr/bin/env python
 import sys
 import os
+import time
 
-from detection.metrics.counters import metrics
+from ivis_logging import setup_logging
+logger = setup_logging("detection")
+
+import ivis_metrics
+import ivis_tracing
+
+from detection.config import Config
 from detection.errors.fatal import FatalError, NonFatalError
 from detection.frame.decoder import FrameDecoder
 from detection.ingest.consumer import FrameConsumer
@@ -11,20 +17,32 @@ from detection.memory.reader import MemoryReader
 from detection.model.loader import load_model
 from detection.model.runner import ModelRunner
 from detection.postprocess.parse import parse_output
-from detection.preprocess.tensorize import to_model_input
-from detection.preprocess.validate import validate_frame
 from detection.publish.results import ResultPublisher
 from detection.runtime import Runtime
 from detection.metrics.counters import metrics
+from ivis.common.contracts.validators import validate_frame_contract_v1, ContractValidationError
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def main():
-    print(">>> Detection Service: Stage 3 (Blind Consumer Frozen) <<<")
+    logger.info(">>> Detection Service: Stage 3 (Blind Consumer) <<<")
     runtime = Runtime()
+    logger.info("Config summary: %s", Config.summary())
+
+    # initialize tracing (best-effort)
+    try:
+        ivis_tracing.init_tracer(service_name=os.getenv("OTEL_SERVICE_NAME", "detection"))
+    except Exception:
+        pass
+
+    # Start Prometheus metrics server (best-effort)
+    try:
+        port = int(os.getenv("DETECTION_METRICS_PORT", "8002"))
+        ivis_metrics.start_metrics_http_server(port)
+        logger.info("Prometheus metrics HTTP server started on port %s", port)
+    except Exception:
+        logger.exception("Failed to start metrics server")
 
     try:
-        # 1. Initialization (Fatal if fails)
         model = load_model()
         runner = ModelRunner(model)
         runner.warmup()
@@ -34,56 +52,134 @@ def main():
         decoder = FrameDecoder()
         publisher = ResultPublisher()
 
-        print(">>> Detection Loop Running <<<")
+        logger.info(">>> Detection Loop Running <<<")
 
-        # 2. Processing Loop
         for frame_contract in consumer:
             if not runtime.running:
                 break
 
             metrics.inc_received()
-
             try:
-                # A. Validate (Strict Clean Schema)
-                validate_frame(frame_contract)
-                
-                # B. Read Raw Bytes (No reshape here)
-                raw_bytes = reader.read(frame_contract["memory"])
-                
-                # C. Decode (Bytes -> Tensor) with Local Knowledge
-                frame = decoder.decode(raw_bytes)
+                # frames in
+                try:
+                    ivis_metrics.frames_in_total.inc()
+                except Exception:
+                    pass
 
-                # D. Inference
-                tensor = to_model_input(frame)
-                raw_results = runner.infer(tensor)
-                
-                # E. Publish
-                result = parse_output(frame_contract["frame_id"], raw_results)
-                publisher.publish(result)
-                
+                # contract validation
+                try:
+                    validate_frame_contract_v1(frame_contract)
+                except ContractValidationError as exc:
+                    reason = getattr(exc, "reason_code", "validation_failed")
+                    metrics.inc_dropped_reason(reason)
+                    try:
+                        ivis_metrics.frames_dropped_total.labels(reason=reason).inc()
+                    except Exception:
+                        pass
+                    logger.debug("Dropped frame due to contract validation: %s", getattr(exc, "message", str(exc)))
+                    continue
+
+                # stale frame
+                if Config.MAX_FRAME_AGE_MS > 0:
+                    now_ms = int(time.time() * 1000)
+                    age_ms = now_ms - int(frame_contract.get("timestamp", now_ms))
+                    if age_ms > Config.MAX_FRAME_AGE_MS:
+                        metrics.inc_dropped()
+                        try:
+                            ivis_metrics.frames_dropped_total.labels(reason="stale").inc()
+                        except Exception:
+                            pass
+                        logger.debug("Dropped stale frame (age=%sms)", age_ms)
+                        continue
+
+                # SHM read (observe)
+                try:
+                    rr_start = time.time()
+                    # trace SHM read
+                    try:
+                        with ivis_tracing.start_span("detection.shm_read", {"frame_id": frame_contract.get("frame_id"), "stream_id": frame_contract.get("stream_id")}):
+                            raw_bytes = reader.read(frame_contract["memory"])
+                    except Exception:
+                        raw_bytes = reader.read(frame_contract["memory"])
+                    rr_ms = (time.time() - rr_start) * 1000.0
+                    try:
+                        ivis_metrics.shm_read_latency_ms.observe(rr_ms)
+                    except Exception:
+                        pass
+                except Exception:
+                    raw_bytes = None
+
+                # decode + inference
+                frame = decoder.decode(raw_bytes, frame_contract)
+                frame_id = frame_contract.get("frame_id")
+                stream_id = frame_contract.get("stream_id")
+                try:
+                    inf_start = time.time()
+                    # inference span
+                    try:
+                        with ivis_tracing.start_span("detection.inference", {"frame_id": frame_id, "stream_id": stream_id}):
+                            raw_results = runner.infer(frame)
+                    except Exception:
+                        raw_results = runner.infer(frame)
+                    inf_ms = (time.time() - inf_start) * 1000.0
+                    try:
+                        ivis_metrics.inference_latency_ms.observe(inf_ms)
+                    except Exception:
+                        pass
+                except Exception:
+                    raise
+
+                # publish
+                result = parse_output(frame_contract, raw_results)
+                # publish span
+                try:
+                    with ivis_tracing.start_span("detection.publish", {"frame_id": frame_id, "stream_id": stream_id}):
+                        publisher.publish(result)
+                except Exception:
+                    publisher.publish(result)
+                try:
+                    ivis_metrics.frames_out_total.inc()
+                except Exception:
+                    pass
+
+                try:
+                    ts = frame_contract.get("timestamp")
+                    if ts is not None:
+                        now_ms = time.time() * 1000.0
+                        e2e = now_ms - float(ts)
+                        ivis_metrics.end_to_end_latency_ms.observe(e2e)
+                except Exception:
+                    pass
+
                 metrics.inc_processed()
 
-            # === Stage 2: Error Discipline ===
-            
             except NonFatalError as e:
                 metrics.inc_dropped()
+                try:
+                    ivis_metrics.frames_dropped_total.labels(reason="nonfatal").inc()
+                except Exception:
+                    pass
+                logger.debug("NonFatalError: %s", str(e))
                 continue
 
             except FatalError as e:
                 metrics.fatal_crashes += 1
-                print(f"!!! FATAL ERROR !!! {e.message} | Context: {e.context}")
+                logger.error("FATAL ERROR: %s | Context: %s", getattr(e, 'message', str(e)), getattr(e, 'context', None))
                 raise e
 
             except Exception as e:
-                print(f"!!! UNHANDLED CRASH !!! {str(e)}")
-                import traceback
-                traceback.print_exc()
+                try:
+                    ivis_metrics.frames_dropped_total.labels(reason="unhandled_exception").inc()
+                except Exception:
+                    pass
+                logger.exception("Unhandled crash: %s", str(e))
                 raise FatalError(f"Unexpected: {e}")
 
     except FatalError:
         sys.exit(1)
     except KeyboardInterrupt:
         sys.exit(0)
+
 
 if __name__ == "__main__":
     main()
