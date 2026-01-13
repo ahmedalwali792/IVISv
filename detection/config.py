@@ -1,37 +1,118 @@
 # FILE: detection/config.py
 # ------------------------------------------------------------------------------
-import os
-
-INFERENCE_TIMEOUT_SECONDS = int(
-    os.getenv("INFERENCE_TIMEOUT", "2")
-)
-
-
+from ivis.common.config.base import ConfigLoadError, EnvLoader, redact_config
 from detection.errors.fatal import FatalError
 
-def _require(key: str) -> str:
-    val = os.getenv(key)
-    if val is None:
-        raise FatalError("Missing required environment variable", context={"key": key})
-    return val
+
+_SCHEMA = {
+    "MODEL_NAME": {"type": "str", "required": True},
+    "MODEL_VERSION": {"type": "str", "required": True},
+    "MODEL_HASH": {"type": "str", "required": True},
+    "MODEL_PATH": {"type": "str", "required": True},
+    "INFERENCE_TIMEOUT": {"type": "int", "default": 5},
+    "MODEL_DEVICE": {"type": "str", "default": "auto"},
+    "MODEL_HALF": {"type": "bool", "default": False},
+    "MODEL_IMG_SIZE": {"type": "int", "default": 640},
+    "MODEL_CONF": {"type": "float", "default": 0.25},
+    "MODEL_IOU": {"type": "float", "default": 0.5},
+    "TRACKER_MAX_AGE": {"type": "int", "default": 8},
+    "TRACKER_INIT_FRAMES": {"type": "int", "default": 3},
+    "TRACKER_NN_BUDGET": {"type": "int", "default": 100},
+    "TRACKER_MAX_IOU": {"type": "float", "default": 0.7},
+    "REID_MODEL_NAME": {"type": "str", "default": "osnet_x0_25"},
+    "REID_MODEL_PATH": {"type": "str", "default": None},
+    "REID_ALLOW_FALLBACK": {"type": "bool", "default": False},
+    "BUS_TRANSPORT": {"type": "str", "default": "redis"},
+    "ZMQ_PUB_ENDPOINT": {"type": "str", "default": "tcp://localhost:5555"},
+    "ZMQ_SUB_ENDPOINT": {"type": "str", "default": "tcp://localhost:5555"},
+    "REDIS_URL": {"type": "str", "default": "redis://localhost:6379/0"},
+    "REDIS_STREAM": {"type": "str", "default": "ivis:frames"},
+    "REDIS_RESULTS_STREAM": {"type": "str", "default": "ivis:results"},
+    "REDIS_MODE": {"type": "str", "default": "streams"},
+    "REDIS_CHANNEL": {"type": "str", "default": "ivis:frames"},
+    "REDIS_RESULTS_CHANNEL": {"type": "str", "default": "ivis:results"},
+    "REDIS_GROUP": {"type": "str", "default": "ivis:detection"},
+    "REDIS_CONSUMER": {"type": "str", "default": "detector-1"},
+    "POSTGRES_DSN": {"type": "str", "default": None},
+    "FRAME_WIDTH": {"type": "int", "default": 640},
+    "FRAME_HEIGHT": {"type": "int", "default": 480},
+    "FRAME_COLOR": {"type": "str", "default": "bgr"},
+    "MEMORY_BACKEND": {"type": "str", "default": "shm"},
+    "SHM_NAME": {"type": "str", "default": "ivis_shm_data"},
+    "SHM_META_NAME": {"type": "str", "default": "ivis_shm_meta"},
+    "SHM_BUFFER_BYTES": {"type": "int", "default": 50000000},
+    "MAX_FRAME_AGE_MS": {"type": "int", "default": 1000},
+    "DEBUG": {"type": "bool", "default": False},
+}
+
+
+def _load_config() -> dict:
+    loader = EnvLoader()
+    try:
+        values = loader.load(_SCHEMA)
+    except ConfigLoadError as exc:
+        raise FatalError("Invalid config", context={"error": str(exc)}) from exc
+    if values["INFERENCE_TIMEOUT"] <= 0:
+        raise FatalError("INFERENCE_TIMEOUT must be > 0")
+    return values
+
 
 class Config:
-    MODEL_NAME = _require("MODEL_NAME")
-    MODEL_VERSION = _require("MODEL_VERSION")
-    MODEL_HASH = _require("MODEL_HASH")
-    MODEL_PATH = _require("MODEL_PATH")
+    _VALUES = _load_config()
 
-    INFERENCE_TIMEOUT_SECONDS = int(_require("INFERENCE_TIMEOUT"))
-    if INFERENCE_TIMEOUT_SECONDS <= 0:
-        raise FatalError("INFERENCE_TIMEOUT must be > 0")
+    MODEL_NAME = _VALUES["MODEL_NAME"]
+    MODEL_VERSION = _VALUES["MODEL_VERSION"]
+    MODEL_HASH = _VALUES["MODEL_HASH"]
+    MODEL_PATH = _VALUES["MODEL_PATH"]
 
-    # Reserved for Stage 4 (Routing / Multi-topic)
-    # Unused in Frozen v1
-    # INPUT_TOPIC = _require("INPUT_TOPIC")
-    # OUTPUT_TOPIC = _require("OUTPUT_TOPIC")
-    
-    # 🆕 Blind Consumer Config (Decoupled from Orchestrator)
-    FRAME_WIDTH = 640
-    FRAME_HEIGHT = 480
+    INFERENCE_TIMEOUT_SECONDS = _VALUES["INFERENCE_TIMEOUT"]
 
-    DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+    # Device/runtime tuning
+    MODEL_DEVICE = _VALUES["MODEL_DEVICE"]
+    MODEL_HALF = _VALUES["MODEL_HALF"]
+    MODEL_IMG_SIZE = _VALUES["MODEL_IMG_SIZE"]
+    MODEL_CONF = _VALUES["MODEL_CONF"]
+    MODEL_IOU = _VALUES["MODEL_IOU"]
+
+    # Tracking / ReID
+    TRACKER_MAX_AGE = _VALUES["TRACKER_MAX_AGE"]
+    TRACKER_INIT_FRAMES = _VALUES["TRACKER_INIT_FRAMES"]
+    TRACKER_NN_BUDGET = _VALUES["TRACKER_NN_BUDGET"]
+    TRACKER_MAX_IOU = _VALUES["TRACKER_MAX_IOU"]
+    REID_MODEL_NAME = _VALUES["REID_MODEL_NAME"]
+    REID_MODEL_PATH = _VALUES["REID_MODEL_PATH"]
+    REID_ALLOW_FALLBACK = _VALUES["REID_ALLOW_FALLBACK"]
+
+    # Bus transport: zmq | redis | tcp
+    BUS_TRANSPORT = _VALUES["BUS_TRANSPORT"]
+    ZMQ_PUB_ENDPOINT = _VALUES["ZMQ_PUB_ENDPOINT"]
+    ZMQ_SUB_ENDPOINT = _VALUES["ZMQ_SUB_ENDPOINT"]
+
+    REDIS_URL = _VALUES["REDIS_URL"]
+    REDIS_STREAM = _VALUES["REDIS_STREAM"]
+    REDIS_RESULTS_STREAM = _VALUES["REDIS_RESULTS_STREAM"]
+    REDIS_MODE = _VALUES["REDIS_MODE"]
+    REDIS_CHANNEL = _VALUES["REDIS_CHANNEL"]
+    REDIS_RESULTS_CHANNEL = _VALUES["REDIS_RESULTS_CHANNEL"]
+    REDIS_GROUP = _VALUES["REDIS_GROUP"]
+    REDIS_CONSUMER = _VALUES["REDIS_CONSUMER"]
+
+    # Persistence
+    POSTGRES_DSN = _VALUES["POSTGRES_DSN"]
+
+    # Blind Consumer Config (Decoupled from Orchestrator)
+    FRAME_WIDTH = _VALUES["FRAME_WIDTH"]
+    FRAME_HEIGHT = _VALUES["FRAME_HEIGHT"]
+    FRAME_COLOR = _VALUES["FRAME_COLOR"].lower()
+
+    MEMORY_BACKEND = _VALUES["MEMORY_BACKEND"]
+    SHM_NAME = _VALUES["SHM_NAME"]
+    SHM_META_NAME = _VALUES["SHM_META_NAME"]
+    SHM_BUFFER_BYTES = _VALUES["SHM_BUFFER_BYTES"]
+    MAX_FRAME_AGE_MS = _VALUES["MAX_FRAME_AGE_MS"]
+
+    DEBUG = _VALUES["DEBUG"]
+
+    @classmethod
+    def summary(cls) -> dict:
+        return redact_config(cls._VALUES)

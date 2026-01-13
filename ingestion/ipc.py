@@ -4,7 +4,7 @@ import json
 import socket
 
 from ingestion.memory.ref import MemoryReference
-from common.contracts.frame_contract import FrameContractV1, FrameMemoryRef
+from ivis.common.contracts.frame_contract import FrameContractV1, FrameMemoryRef
 
 
 class SocketPublisher:

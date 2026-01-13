@@ -1,8 +1,5 @@
 """
-Legacy ingestion IPC transports (kept for reference and optional backwards compatibility).
-This module is intentionally isolated under `ivis.legacy` and is NOT part of the
-default production path. Use Redis Streams (`RedisPublisher`) in `ingestion.ipc`
-for production.
+Legacy ingestion IPC transports (shims inside the installed `ivis` package).
 """
 import json
 import socket
@@ -12,10 +9,6 @@ from ivis.common.contracts.frame_contract import FrameContractV1, FrameMemoryRef
 
 
 class SocketPublisher:
-    """
-    TCP publisher (legacy).
-    """
-
     def __init__(self, config, host="localhost", port=5555):
         self.stream_id = config.stream_id
         self.camera_id = config.camera_id
@@ -113,7 +106,7 @@ def _build_contract(
     )
     output_color = "bgr"
     contract = FrameContractV1(
-        contract_version=1,
+        contract_version="v1",
         frame_id=frame_identity.frame_id,
         stream_id=stream_id,
         camera_id=camera_id,
