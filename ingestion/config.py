@@ -39,6 +39,23 @@ class Config:
             "VIDEO_LOOP": {"type": "bool", "default": False},
             "RTSP_MAX_RETRIES": {"type": "int", "default": 0},
             "RTSP_RETRY_BACKOFF_SEC": {"type": "float", "default": 1.0},
+            "RTSP_RECONNECT_MIN_SEC": {"type": "float", "default": 0.5},
+            "RTSP_RECONNECT_MAX_SEC": {"type": "float", "default": 30.0},
+            "RTSP_RECONNECT_FACTOR": {"type": "float", "default": 2.0},
+            "RTSP_RECONNECT_JITTER": {"type": "float", "default": 0.2},
+            "RTSP_FROZEN_TIMEOUT_SEC": {"type": "float", "default": 5.0},
+            "RTSP_FROZEN_HASH_COUNT": {"type": "int", "default": 30},
+            "RTSP_FROZEN_PTS_COUNT": {"type": "int", "default": 30},
+            "RTSP_FROZEN_TIMESTAMP_COUNT": {"type": "int", "default": 30},
+            "HEALTH_STREAM": {"type": "str", "default": "ivis:health"},
+            "HEALTH_INTERVAL_SEC": {"type": "float", "default": 5.0},
+            "ADAPTIVE_LAG_THRESHOLD": {"type": "int", "default": 2000},
+            "ADAPTIVE_LAG_HYSTERESIS": {"type": "float", "default": 0.2},
+            "ROI_BOXES": {"type": "str", "default": None},
+            "ROI_POLYGONS": {"type": "str", "default": None},
+            "RECORD_BUFFER_SECONDS": {"type": "float", "default": 0},
+            "RECORD_JPEG_QUALITY": {"type": "int", "default": 85},
+            "RECORD_BUFFER_MAX_FRAMES": {"type": "int", "default": None},
         }
         loader = EnvLoader()
         try:
@@ -92,6 +109,29 @@ class Config:
         self.video_loop = values["VIDEO_LOOP"]
         self.rtsp_max_retries = values["RTSP_MAX_RETRIES"]
         self.rtsp_retry_backoff_sec = values["RTSP_RETRY_BACKOFF_SEC"]
+        if os.getenv("RTSP_RECONNECT_MIN_SEC") is None:
+            self.rtsp_reconnect_min_sec = self.rtsp_retry_backoff_sec
+        else:
+            self.rtsp_reconnect_min_sec = values["RTSP_RECONNECT_MIN_SEC"]
+        if os.getenv("RTSP_RECONNECT_MAX_SEC") is None:
+            self.rtsp_reconnect_max_sec = max(self.rtsp_reconnect_min_sec, self.rtsp_retry_backoff_sec * 10.0)
+        else:
+            self.rtsp_reconnect_max_sec = values["RTSP_RECONNECT_MAX_SEC"]
+        self.rtsp_reconnect_factor = values["RTSP_RECONNECT_FACTOR"]
+        self.rtsp_reconnect_jitter = values["RTSP_RECONNECT_JITTER"]
+        self.rtsp_frozen_timeout_sec = values["RTSP_FROZEN_TIMEOUT_SEC"]
+        self.rtsp_frozen_hash_count = values["RTSP_FROZEN_HASH_COUNT"]
+        self.rtsp_frozen_pts_count = values["RTSP_FROZEN_PTS_COUNT"]
+        self.rtsp_frozen_timestamp_count = values["RTSP_FROZEN_TIMESTAMP_COUNT"]
+        self.health_stream = values["HEALTH_STREAM"]
+        self.health_interval_sec = values["HEALTH_INTERVAL_SEC"]
+        self.adaptive_lag_threshold = values["ADAPTIVE_LAG_THRESHOLD"]
+        self.adaptive_lag_hysteresis = values["ADAPTIVE_LAG_HYSTERESIS"]
+        self.roi_boxes = values["ROI_BOXES"]
+        self.roi_polygons = values["ROI_POLYGONS"]
+        self.record_buffer_seconds = values["RECORD_BUFFER_SECONDS"]
+        self.record_jpeg_quality = values["RECORD_JPEG_QUALITY"]
+        self.record_buffer_max_frames = values["RECORD_BUFFER_MAX_FRAMES"]
 
         self._validate()
 
@@ -110,6 +150,24 @@ class Config:
             raise ConfigError("Invalid RTSP_MAX_RETRIES", context={"value": self.rtsp_max_retries})
         if self.rtsp_retry_backoff_sec < 0:
             raise ConfigError("Invalid RTSP_RETRY_BACKOFF_SEC", context={"value": self.rtsp_retry_backoff_sec})
+        if self.rtsp_reconnect_min_sec < 0 or self.rtsp_reconnect_max_sec < 0:
+            raise ConfigError("Invalid RTSP_RECONNECT_MIN_SEC/RTSP_RECONNECT_MAX_SEC")
+        if self.rtsp_reconnect_factor < 1.0:
+            raise ConfigError("Invalid RTSP_RECONNECT_FACTOR", context={"value": self.rtsp_reconnect_factor})
+        if self.rtsp_reconnect_jitter < 0:
+            raise ConfigError("Invalid RTSP_RECONNECT_JITTER", context={"value": self.rtsp_reconnect_jitter})
+        if self.rtsp_frozen_timeout_sec < 0:
+            raise ConfigError("Invalid RTSP_FROZEN_TIMEOUT_SEC", context={"value": self.rtsp_frozen_timeout_sec})
+        if self.health_interval_sec <= 0:
+            raise ConfigError("Invalid HEALTH_INTERVAL_SEC", context={"value": self.health_interval_sec})
+        if self.adaptive_lag_threshold < 0:
+            raise ConfigError("Invalid ADAPTIVE_LAG_THRESHOLD", context={"value": self.adaptive_lag_threshold})
+        if self.adaptive_lag_hysteresis < 0:
+            raise ConfigError("Invalid ADAPTIVE_LAG_HYSTERESIS", context={"value": self.adaptive_lag_hysteresis})
+        if self.record_buffer_seconds < 0:
+            raise ConfigError("Invalid RECORD_BUFFER_SECONDS", context={"value": self.record_buffer_seconds})
+        if self.record_jpeg_quality <= 0 or self.record_jpeg_quality > 100:
+            raise ConfigError("Invalid RECORD_JPEG_QUALITY", context={"value": self.record_jpeg_quality})
 
     @property
     def resolution(self):

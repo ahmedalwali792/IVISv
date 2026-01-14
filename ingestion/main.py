@@ -9,20 +9,25 @@ from ivis_logging import setup_logging
 logger = setup_logging("ingestion")
 import ivis_metrics
 import ivis_tracing
-from ivis.common.time_utils import latency_ms, wall_clock_ms
+from ivis.common.time_utils import latency_ms, wall_clock_ms, monotonic_ms
 
 from ingestion.capture.decoder import Decoder
+from ingestion.capture.frozen import FrozenStreamDetector
 from ingestion.capture.reader import Reader
+from ingestion.capture.reconnect import ReconnectController
 from ingestion.capture.rtsp_client import RTSPClient
 from ingestion.config import Config
 from ingestion.errors.fatal import ConfigError, FatalError
 from ingestion.frame.anchor import Anchor
 from ingestion.frame.id import FrameIdentity
 from ingestion.frame.normalizer import Normalizer
+from ingestion.feedback.lag_controller import LagBasedRateController
+from ingestion.frame.roi import apply_mask, build_mask, parse_boxes, parse_polygons
 from ingestion.frame.selector import Selector
 from ingestion.heartbeat import Heartbeat
 from ingestion.memory.writer import Writer
 from ingestion.metrics.counters import Metrics
+from ingestion.recording.buffer import RecordingBuffer
 from ingestion.runtime import Runtime
 from ingestion.feedback.adaptive import AdaptiveRateController
 
@@ -93,6 +98,18 @@ def main():
         selector = Selector(conf.target_fps, mode=conf.selector_mode)
         normalizer = Normalizer(conf.resolution, frame_color=conf.frame_color)
         anchor = Anchor()
+
+        roi_boxes = parse_boxes(conf.roi_boxes)
+        roi_polygons = parse_polygons(conf.roi_polygons)
+        roi_mask = build_mask(conf.frame_width, conf.frame_height, roi_boxes, roi_polygons)
+        roi_meta = None
+        if roi_mask is not None:
+            roi_meta = {}
+            if roi_boxes:
+                roi_meta["boxes"] = roi_boxes
+            if roi_polygons:
+                roi_meta["polygons"] = roi_polygons
+            logger.info("ROI enabled (boxes=%s, polygons=%s).", len(roi_boxes), len(roi_polygons))
         
         # --- Backend Selection (Strict) ---
         if conf.memory_backend == "shm":
@@ -130,7 +147,51 @@ def main():
                 conf.redis_results_channel,
             )
 
-        heartbeat = Heartbeat(conf.stream_id)
+        lag_controller = None
+        if conf.adaptive_fps and conf.adaptive_lag_threshold > 0:
+            lag_controller = LagBasedRateController(
+                selector,
+                conf.adaptive_min_fps,
+                conf.adaptive_max_fps,
+                conf.adaptive_lag_threshold,
+                conf.adaptive_lag_hysteresis,
+            )
+            logger.info("Adaptive lag policy enabled (threshold=%s).", conf.adaptive_lag_threshold)
+
+        heartbeat = Heartbeat(
+            conf.stream_id,
+            conf.camera_id,
+            conf.redis_url,
+            conf.health_stream,
+            conf.health_interval_sec,
+        )
+
+        reconnect = ReconnectController(
+            conf.rtsp_reconnect_min_sec,
+            conf.rtsp_reconnect_max_sec,
+            conf.rtsp_reconnect_factor,
+            conf.rtsp_reconnect_jitter,
+            conf.rtsp_max_retries,
+        )
+        frozen = FrozenStreamDetector(
+            conf.rtsp_frozen_timeout_sec,
+            conf.rtsp_frozen_hash_count,
+            conf.rtsp_frozen_pts_count,
+            conf.rtsp_frozen_timestamp_count,
+        )
+
+        record_buffer = None
+        record_buffer_drops = 0
+        if conf.record_buffer_seconds and conf.record_buffer_seconds > 0:
+            max_frames = conf.record_buffer_max_frames
+            if max_frames is None:
+                max_frames = max(1, int(conf.record_buffer_seconds * conf.adaptive_max_fps * 1.2))
+            record_buffer = RecordingBuffer(
+                conf.record_buffer_seconds,
+                max_frames,
+                conf.record_jpeg_quality,
+            )
+            logger.info("Recording buffer enabled (seconds=%s, max_frames=%s).", conf.record_buffer_seconds, max_frames)
         
         rtsp.connect()
 
@@ -140,12 +201,33 @@ def main():
 
     logger.info(f">>> Ingestion Running | Stream: {conf.stream_id} <<<")
 
+    def _attempt_reconnect(reason: str) -> bool:
+        _record_issue(f"rtsp_{reason}", "RTSP reconnect triggered", None)
+        heartbeat.tick(status="degraded", reason=reason)
+        while runtime.should_continue():
+            delay = reconnect.wait()
+            if delay is None:
+                return False
+            logger.warning(
+                "Attempting reconnect in %.2fs (reason=%s, attempt=%s).",
+                delay,
+                reason,
+                reconnect.attempts,
+            )
+            if rtsp.reconnect():
+                reconnect.reset()
+                frozen.reset()
+                logger.info("Source reconnected (reason=%s).", reason)
+                heartbeat.tick(status="ok", reason="reconnected")
+                return True
+        return False
+
     while runtime.should_continue():
         try:
             heartbeat.tick()
-            
+
             packet = reader.next_packet()
-            
+
             if packet is None:
                 if conf.video_loop and rtsp.is_file:
                     logger.warning("Source EOF reached. Rewinding file input.")
@@ -156,23 +238,15 @@ def main():
                     continue
                 if rtsp.is_file:
                     raise FatalError("Source EOF or Connection Lost")
-                if conf.rtsp_max_retries > 0:
-                    logger.warning(
-                        "Source read failed. Attempting reconnect (max_retries=%s, backoff=%ss).",
-                        conf.rtsp_max_retries,
-                        conf.rtsp_retry_backoff_sec,
-                    )
-                    reconnected = False
-                    for attempt in range(1, conf.rtsp_max_retries + 1):
-                        time.sleep(conf.rtsp_retry_backoff_sec * attempt)
-                        if rtsp.reconnect():
-                            reconnected = True
-                            logger.info("Source reconnected after attempt %s.", attempt)
-                            break
-                    if reconnected:
-                        continue
-                    raise FatalError("Source reconnect failed")
-                raise FatalError("Source EOF or Connection Lost")
+                freeze_reason = frozen.check(monotonic_ms())
+                if freeze_reason:
+                    if not _attempt_reconnect(f"frozen_{freeze_reason}"):
+                        raise FatalError("Source reconnect failed")
+                else:
+                    time.sleep(0.05)
+                continue
+
+            reconnect.reset()
 
             if packet.pts <= 0:
                 metrics.inc_dropped_pts()
@@ -202,6 +276,8 @@ def main():
                 continue
 
             clean_frame = normalizer.process(raw_frame)
+            if roi_mask is not None:
+                clean_frame = apply_mask(clean_frame, roi_mask)
             # normalization span
             try:
                 with ivis_tracing.start_span("ingestion.normalize", {"stream_id": conf.stream_id}):
@@ -209,10 +285,24 @@ def main():
             except Exception as exc:
                 _record_issue("tracing_span_normalize_failed", "Tracing span failed (normalize)", exc)
             fingerprint = anchor.generate(clean_frame)
+            frozen.note_frame(packet.pts, packet.timestamp_ms, fingerprint, packet.mono_ms)
+            freeze_reason = frozen.check(packet.mono_ms)
+            if freeze_reason and not rtsp.is_file:
+                if not _attempt_reconnect(f"frozen_{freeze_reason}"):
+                    raise FatalError("Source reconnect failed")
+                continue
             identity = FrameIdentity(conf.stream_id, packet.pts, fingerprint)
-            # Measure SHM write latency
+            if record_buffer is not None:
+                if record_buffer.add_frame(clean_frame, packet.timestamp_ms):
+                    _safe_metric("record_buffer_size_failed", lambda: ivis_metrics.record_buffer_size.set(record_buffer.size()))
+                    if record_buffer.drops > record_buffer_drops:
+                        _safe_metric(
+                            "record_buffer_drops_failed",
+                            lambda: ivis_metrics.record_buffer_drops.inc(record_buffer.drops - record_buffer_drops),
+                        )
+                        record_buffer_drops = record_buffer.drops
+            # Write to SHM
             try:
-                sw_start = time.time()
                 # SHM write span
                 ref = None
                 try:
@@ -222,23 +312,22 @@ def main():
                     _record_issue("tracing_span_shm_write_failed", "Tracing span failed (shm_write)", exc)
                     # fallback to direct write if tracing wrapper failed
                     ref = writer.write(clean_frame, identity)
-                sw_ms = (time.time() - sw_start) * 1000.0
-                _safe_metric("metrics_shm_write_latency_failed", lambda: ivis_metrics.shm_write_latency_ms.observe(sw_ms))
             except Exception:
                 ref = None
 
             # publish span
             try:
                 with ivis_tracing.start_span("ingestion.publish", {"frame_id": identity.frame_id, "stream_id": identity.stream_id}):
-                    published = publisher.publish(identity, packet.timestamp_ms, packet.mono_ms, ref)
+                    published = publisher.publish(identity, packet.timestamp_ms, packet.mono_ms, ref, roi_meta=roi_meta)
             except Exception as exc:
                 _record_issue("tracing_span_publish_failed", "Tracing span failed (publish)", exc)
                 # if tracing wrapper fails, attempt publish anyway
-                published = publisher.publish(identity, packet.timestamp_ms, packet.mono_ms, ref)
+                published = publisher.publish(identity, packet.timestamp_ms, packet.mono_ms, ref, roi_meta=roi_meta)
             if not published:
                 # Frame dropped due to backpressure/lag
                 metrics.inc_dropped_reason("lag")
                 _safe_metric("metrics_frames_dropped_failed", lambda: ivis_metrics.frames_dropped_total.labels(reason="lag").inc())
+                _safe_metric("metrics_drops_total_failed", lambda: ivis_metrics.drops_total.labels(reason="lag").inc())
                 logger.debug("Dropped frame due to backpressure/lag (stream length exceeded)")
             else:
                 metrics.inc_processed()
@@ -257,8 +346,12 @@ def main():
                     xlen = int(publisher.redis.xlen(publisher.stream) or 0)
                     metrics.set_redis_stream_lag(xlen)
                     _safe_metric("metrics_redis_lag_failed", lambda: ivis_metrics.redis_lag.set(xlen))
+                    if lag_controller is not None:
+                        if lag_controller.update(xlen):
+                            logger.info("Adaptive FPS lag cap updated (target_fps=%s).", selector.target_fps)
             except Exception as exc:
                 _record_issue("redis_lag_query_failed", "Failed to read Redis stream length", exc)
+            _safe_metric("metrics_adaptive_fps_failed", lambda: ivis_metrics.adaptive_fps_current.set(selector.target_fps))
         
         except FatalError as e:
             logger.error("!!! FATAL ERROR !!! %s | Context: %s", getattr(e, 'message', str(e)), getattr(e, 'context', None))
