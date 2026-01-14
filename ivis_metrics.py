@@ -7,6 +7,7 @@ import time
 frames_in_total = Counter("frames_in_total", "Total frames entering the pipeline")
 frames_out_total = Counter("frames_out_total", "Total frames successfully processed/published")
 frames_dropped_total = Counter("frames_dropped_total", "Total frames dropped", ["reason"])
+service_errors_total = Counter("service_errors_total", "Service errors", ["service", "reason"])
 
 # Latency metrics (measured in milliseconds)
 shm_write_latency_ms = Histogram("shm_write_latency_ms", "SHM write latency (ms)")

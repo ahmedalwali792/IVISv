@@ -24,6 +24,34 @@ from detection.metrics.counters import metrics
 from ivis.common.contracts.validators import validate_frame_contract_v1, ContractValidationError
 
 
+_warned = set()
+
+
+def _log_once(key: str, message: str, exc: Exception = None) -> None:
+    if key in _warned:
+        return
+    _warned.add(key)
+    if exc is not None:
+        logger.warning("%s: %s", message, exc)
+    else:
+        logger.warning("%s", message)
+
+
+def _record_issue(reason: str, message: str, exc: Exception = None) -> None:
+    _log_once(reason, message, exc)
+    try:
+        ivis_metrics.service_errors_total.labels(service="detection", reason=reason).inc()
+    except Exception as metric_exc:
+        _log_once(f"{reason}_metric", "Failed to record service error metric", metric_exc)
+
+
+def _safe_metric(reason: str, fn) -> None:
+    try:
+        fn()
+    except Exception as exc:
+        _record_issue(reason, "Metrics update failed", exc)
+
+
 def main():
     logger.info(">>> Detection Service: Stage 3 (Blind Consumer) <<<")
     runtime = Runtime()
@@ -32,16 +60,16 @@ def main():
     # initialize tracing (best-effort)
     try:
         ivis_tracing.init_tracer(service_name=os.getenv("OTEL_SERVICE_NAME", "detection"))
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_issue("tracing_init_failed", "Tracing init failed", exc)
 
     # Start Prometheus metrics server (best-effort)
     try:
         port = int(os.getenv("DETECTION_METRICS_PORT", "8002"))
         ivis_metrics.start_metrics_http_server(port)
         logger.info("Prometheus metrics HTTP server started on port %s", port)
-    except Exception:
-        logger.exception("Failed to start metrics server")
+    except Exception as exc:
+        _record_issue("metrics_server_failed", "Failed to start metrics server", exc)
 
     try:
         model = load_model()
@@ -62,10 +90,7 @@ def main():
             metrics.inc_received()
             try:
                 # frames in
-                try:
-                    ivis_metrics.frames_in_total.inc()
-                except Exception:
-                    pass
+                _safe_metric("metrics_frames_in_failed", ivis_metrics.frames_in_total.inc)
 
                 # contract validation
                 try:
@@ -73,10 +98,10 @@ def main():
                 except ContractValidationError as exc:
                     reason = getattr(exc, "reason_code", "validation_failed")
                     metrics.inc_dropped_reason(reason)
-                    try:
-                        ivis_metrics.frames_dropped_total.labels(reason=reason).inc()
-                    except Exception:
-                        pass
+                    _safe_metric(
+                        "metrics_frames_dropped_failed",
+                        lambda: ivis_metrics.frames_dropped_total.labels(reason=reason).inc(),
+                    )
                     logger.debug("Dropped frame due to contract validation: %s", getattr(exc, "message", str(exc)))
                     continue
 
@@ -86,10 +111,10 @@ def main():
                     age_ms = latency_ms(now_ms, int(frame_contract.get("timestamp_ms", now_ms)))
                     if age_ms > Config.MAX_FRAME_AGE_MS:
                         metrics.inc_dropped()
-                        try:
-                            ivis_metrics.frames_dropped_total.labels(reason="stale").inc()
-                        except Exception:
-                            pass
+                        _safe_metric(
+                            "metrics_frames_dropped_failed",
+                            lambda: ivis_metrics.frames_dropped_total.labels(reason="stale").inc(),
+                        )
                         logger.debug("Dropped stale frame (age=%sms)", age_ms)
                         continue
 
@@ -100,13 +125,11 @@ def main():
                     try:
                         with ivis_tracing.start_span("detection.shm_read", {"frame_id": frame_contract.get("frame_id"), "stream_id": frame_contract.get("stream_id")}):
                             raw_bytes = reader.read(frame_contract["memory"])
-                    except Exception:
+                    except Exception as exc:
+                        _record_issue("tracing_span_shm_read_failed", "Tracing span failed (shm_read)", exc)
                         raw_bytes = reader.read(frame_contract["memory"])
                     rr_ms = (time.time() - rr_start) * 1000.0
-                    try:
-                        ivis_metrics.shm_read_latency_ms.observe(rr_ms)
-                    except Exception:
-                        pass
+                    _safe_metric("metrics_shm_read_latency_failed", lambda: ivis_metrics.shm_read_latency_ms.observe(rr_ms))
                 except Exception:
                     raw_bytes = None
 
@@ -120,13 +143,11 @@ def main():
                     try:
                         with ivis_tracing.start_span("detection.inference", {"frame_id": frame_id, "stream_id": stream_id}):
                             raw_results = runner.infer(frame)
-                    except Exception:
+                    except Exception as exc:
+                        _record_issue("tracing_span_inference_failed", "Tracing span failed (inference)", exc)
                         raw_results = runner.infer(frame)
                     inf_ms = (time.time() - inf_start) * 1000.0
-                    try:
-                        ivis_metrics.inference_latency_ms.observe(inf_ms)
-                    except Exception:
-                        pass
+                    _safe_metric("metrics_inference_latency_failed", lambda: ivis_metrics.inference_latency_ms.observe(inf_ms))
                 except Exception:
                     raise
 
@@ -136,30 +157,28 @@ def main():
                 try:
                     with ivis_tracing.start_span("detection.publish", {"frame_id": frame_id, "stream_id": stream_id}):
                         publisher.publish(result)
-                except Exception:
+                except Exception as exc:
+                    _record_issue("tracing_span_publish_failed", "Tracing span failed (publish)", exc)
                     publisher.publish(result)
-                try:
-                    ivis_metrics.frames_out_total.inc()
-                except Exception:
-                    pass
+                _safe_metric("metrics_frames_out_failed", ivis_metrics.frames_out_total.inc)
 
                 try:
                     ts = frame_contract.get("timestamp_ms")
                     if ts is not None:
                         now_ms = wall_clock_ms()
                         e2e = latency_ms(now_ms, int(ts))
-                        ivis_metrics.end_to_end_latency_ms.observe(e2e)
-                except Exception:
-                    pass
+                        _safe_metric("metrics_end_to_end_latency_failed", lambda: ivis_metrics.end_to_end_latency_ms.observe(e2e))
+                except Exception as exc:
+                    _record_issue("end_to_end_latency_failed", "End-to-end latency calculation failed", exc)
 
                 metrics.inc_processed()
 
             except NonFatalError as e:
                 metrics.inc_dropped()
-                try:
-                    ivis_metrics.frames_dropped_total.labels(reason="nonfatal").inc()
-                except Exception:
-                    pass
+                _safe_metric(
+                    "metrics_frames_dropped_failed",
+                    lambda: ivis_metrics.frames_dropped_total.labels(reason="nonfatal").inc(),
+                )
                 logger.debug("NonFatalError: %s", str(e))
                 continue
 
@@ -169,10 +188,10 @@ def main():
                 raise e
 
             except Exception as e:
-                try:
-                    ivis_metrics.frames_dropped_total.labels(reason="unhandled_exception").inc()
-                except Exception:
-                    pass
+                _safe_metric(
+                    "metrics_frames_dropped_failed",
+                    lambda: ivis_metrics.frames_dropped_total.labels(reason="unhandled_exception").inc(),
+                )
                 logger.exception("Unhandled crash: %s", str(e))
                 raise FatalError(f"Unexpected: {e}")
 

@@ -2,9 +2,33 @@
 # ------------------------------------------------------------------------------
 import json
 import socket
+import logging
 
 from ingestion.memory.ref import MemoryReference
 from ivis.common.contracts.frame_contract import FrameContractV1, FrameMemoryRef
+import ivis_metrics
+
+
+_logger = logging.getLogger("ingestion")
+_warned = set()
+
+
+def _log_once(key: str, message: str, exc: Exception = None) -> None:
+    if key in _warned:
+        return
+    _warned.add(key)
+    if exc is not None:
+        _logger.warning("%s: %s", message, exc)
+    else:
+        _logger.warning("%s", message)
+
+
+def _record_issue(reason: str, message: str, exc: Exception = None) -> None:
+    _log_once(reason, message, exc)
+    try:
+        ivis_metrics.service_errors_total.labels(service="ingestion", reason=reason).inc()
+    except Exception as metric_exc:
+        _log_once(f"{reason}_metric", "Failed to record service error metric", metric_exc)
 
 
 class SocketPublisher:
@@ -26,7 +50,8 @@ class SocketPublisher:
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect(self.address)
-        except Exception:
+        except (OSError, ConnectionError) as exc:
+            _record_issue("socket_connect_failed", "Socket connect failed", exc)
             self.sock = None
 
     def publish(self, frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref):
@@ -48,8 +73,9 @@ class SocketPublisher:
         if self.sock:
             try:
                 self.sock.sendall(payload.encode())
-            except Exception:
-                print("[PUB] Transport lost. Dropping msg.")
+            except (OSError, ConnectionError) as exc:
+                _record_issue("socket_send_failed", "Socket send failed", exc)
+                _logger.warning("[PUB] Transport lost. Dropping msg.")
                 self.sock.close()
                 self._connect()
         else:
@@ -112,8 +138,10 @@ class RedisPublisher:
 
         try:
             self.stream_maxlen = int(os.getenv("REDIS_STREAM_MAXLEN", "2000"))
-        except Exception:
+        except (TypeError, ValueError) as exc:
+            _record_issue("redis_maxlen_invalid", "Invalid REDIS_STREAM_MAXLEN; using default", exc)
             self.stream_maxlen = 2000
+        self._redis_error = getattr(redis.exceptions, "RedisError", Exception)
 
     def publish(self, frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref):
         gen = getattr(memory_ref, "generation", 0)
@@ -138,7 +166,8 @@ class RedisPublisher:
                 # Backpressure policy: if stream length exceeds threshold, trim or drop
                 try:
                     xlen = int(self.redis.xlen(self.stream) or 0)
-                except Exception:
+                except (self._redis_error, TypeError, ValueError) as exc:
+                    _record_issue("redis_xlen_failed", "Failed to read Redis stream length", exc)
                     xlen = 0
 
                 # If stream very long, trim old entries first
@@ -146,13 +175,14 @@ class RedisPublisher:
                     try:
                         # Trim to keep stream manageable
                         self.redis.xtrim(self.stream, maxlen=self.stream_maxlen, approximate=False)
-                    except Exception:
-                        pass
+                    except self._redis_error as exc:
+                        _record_issue("redis_xtrim_failed", "Failed to trim Redis stream", exc)
 
                 # Recompute length and decide to drop if still above threshold
                 try:
                     xlen = int(self.redis.xlen(self.stream) or 0)
-                except Exception:
+                except (self._redis_error, TypeError, ValueError) as exc:
+                    _record_issue("redis_xlen_failed", "Failed to read Redis stream length", exc)
                     xlen = 0
 
                 if xlen > self.stream_maxlen:
@@ -222,7 +252,8 @@ def get_publisher(config):
             from ivis.legacy.ingestion_ipc_legacy import ZmqPublisher as LegacyZmqPublisher
 
             return LegacyZmqPublisher(config, getattr(config, "zmq_pub_endpoint", "tcp://localhost:5555"))
-        except Exception:
+        except Exception as exc:
+            _record_issue("legacy_zmq_import_failed", "Legacy ZMQ publisher import failed; falling back", exc)
             # fallback to module-local ZmqPublisher if legacy package missing
             return ZmqPublisher(config, getattr(config, "zmq_pub_endpoint", "tcp://localhost:5555"))
     if transport == "redis":
@@ -251,5 +282,6 @@ def get_publisher(config):
         from ivis.legacy.ingestion_ipc_legacy import SocketPublisher as LegacySocketPublisher
 
         return LegacySocketPublisher(config)
-    except Exception:
+    except Exception as exc:
+        _record_issue("legacy_socket_import_failed", "Legacy Socket publisher import failed; falling back", exc)
         return SocketPublisher(config)

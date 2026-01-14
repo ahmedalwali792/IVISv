@@ -40,6 +40,33 @@ FRAME_COLOR_SPACE = os.getenv("FRAME_COLOR_SPACE", "bgr").lower()
 app = Flask(__name__)
 logger = setup_logging("ui")
 
+_warned = set()
+
+
+def _log_once(key: str, message: str, exc: Exception = None) -> None:
+    if key in _warned:
+        return
+    _warned.add(key)
+    if exc is not None:
+        logger.warning("%s: %s", message, exc)
+    else:
+        logger.warning("%s", message)
+
+
+def _record_issue(reason: str, message: str, exc: Exception = None) -> None:
+    _log_once(reason, message, exc)
+    try:
+        ivis_metrics.service_errors_total.labels(service="ui", reason=reason).inc()
+    except Exception as metric_exc:
+        _log_once(f"{reason}_metric", "Failed to record service error metric", metric_exc)
+
+
+def _safe_metric(reason: str, fn) -> None:
+    try:
+        fn()
+    except Exception as exc:
+        _record_issue(reason, "Metrics update failed", exc)
+
 RESULTS_CACHE_MAX = int(os.getenv("UI_RESULTS_CACHE_MAX", "2000"))
 RESULTS_CACHE_TTL_SEC = float(os.getenv("UI_RESULTS_CACHE_TTL_SEC", "60"))
 
@@ -60,10 +87,7 @@ _threads_started = False
 _threads_lock = threading.Lock()
 
 def _update_cache_metric():
-    try:
-        ivis_metrics.ui_results_cache_size.set(len(results_cache))
-    except Exception:
-        pass
+    _safe_metric("metrics_ui_cache_size_failed", lambda: ivis_metrics.ui_results_cache_size.set(len(results_cache)))
 
 
 def _cache_set(frame_id: str, result: dict):
@@ -249,7 +273,8 @@ def _frame_loop():
                             _handle_contract(contract)
                     except Exception:
                         logger.exception("Failed to handle stream contract")
-        except Exception:
+        except Exception as exc:
+            _record_issue("ui_frame_loop_failed", "Frame loop error", exc)
             time.sleep(0.1)
 
 
@@ -316,7 +341,8 @@ def _results_loop():
                             last_result = result
                     except Exception:
                         logger.exception("Failed to parse/handle result payload")
-        except Exception:
+        except Exception as exc:
+            _record_issue("ui_results_loop_failed", "Results loop error", exc)
             time.sleep(0.1)
 
 
@@ -332,8 +358,8 @@ def _handle_contract(contract: dict):
     except ContractValidationError as exc:
         try:
             detection_metrics.inc_dropped_reason(getattr(exc, "reason_code", "validation_failed"))
-        except Exception:
-            pass
+        except Exception as metric_exc:
+            _record_issue("ui_dropped_reason_failed", "Failed to update dropped reason metric", metric_exc)
         logger.debug("Dropped contract in UI due to validation: %s", getattr(exc, "message", str(exc)))
         return
     try:
@@ -348,13 +374,11 @@ def _handle_contract(contract: dict):
         try:
             with ivis_tracing.start_span("ui.shm_read", {"frame_id": contract.get("frame_id"), "stream_id": contract.get("stream_id")}):
                 data = ring.read(slot, gen)
-        except Exception:
+        except Exception as exc:
+            _record_issue("tracing_span_shm_read_failed", "Tracing span failed (ui shm_read)", exc)
             data = ring.read(slot, gen)
-        try:
-            rr_ms = (time.time() - rr_start) * 1000.0
-            ivis_metrics.shm_read_latency_ms.observe(rr_ms)
-        except Exception:
-            pass
+        rr_ms = (time.time() - rr_start) * 1000.0
+        _safe_metric("metrics_shm_read_latency_failed", lambda: ivis_metrics.shm_read_latency_ms.observe(rr_ms))
         if not data:
             return
     except Exception:
@@ -398,15 +422,13 @@ def _handle_contract(contract: dict):
         fps = 1.0 / max(1e-6, (now - last_frame_ts))
         fps_ema = fps if fps_ema == 0.0 else (0.9 * fps_ema + 0.1 * fps)
     last_frame_ts = now
-    try:
-        ivis_metrics.fps_out.set(fps_ema)
-    except Exception:
-        pass
+    _safe_metric("metrics_fps_out_failed", lambda: ivis_metrics.fps_out.set(fps_ema))
     # overlay span (drawing + composite)
     try:
         with ivis_tracing.start_span("ui.overlay", {"frame_id": frame_id, "stream_id": contract.get("stream_id")}):
             frame_bgr = _overlay(frame_bgr, result, fps_ema)
-    except Exception:
+    except Exception as exc:
+        _record_issue("tracing_span_overlay_failed", "Tracing span failed (ui overlay)", exc)
         frame_bgr = _overlay(frame_bgr, result, fps_ema)
     with latest_lock:
         global latest_frame, latest_meta
@@ -454,7 +476,8 @@ def _shm_fallback_loop():
                     "camera_id": os.getenv("CAMERA_ID"),
                 }
                 last_shm_ts = time.perf_counter()
-        except Exception:
+        except Exception as exc:
+            _record_issue("ui_shm_fallback_failed", "SHM fallback loop error", exc)
             time.sleep(0.1)
 
 

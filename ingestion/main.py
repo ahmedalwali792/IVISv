@@ -34,6 +34,33 @@ try:
 except ImportError:
     IPC_AVAILABLE = False
 
+_warned = set()
+
+
+def _log_once(key: str, message: str, exc: Exception = None) -> None:
+    if key in _warned:
+        return
+    _warned.add(key)
+    if exc is not None:
+        logger.warning("%s: %s", message, exc)
+    else:
+        logger.warning("%s", message)
+
+
+def _record_issue(reason: str, message: str, exc: Exception = None) -> None:
+    _log_once(reason, message, exc)
+    try:
+        ivis_metrics.service_errors_total.labels(service="ingestion", reason=reason).inc()
+    except Exception as metric_exc:
+        _log_once(f"{reason}_metric", "Failed to record service error metric", metric_exc)
+
+
+def _safe_metric(reason: str, fn) -> None:
+    try:
+        fn()
+    except Exception as exc:
+        _record_issue(reason, "Metrics update failed", exc)
+
 def main():
     logger.info(">>> Ingestion Service: Initializing (Frozen v1.0) <<<")
     
@@ -49,15 +76,15 @@ def main():
     # initialize tracing (best-effort)
     try:
         ivis_tracing.init_tracer(service_name=os.getenv("OTEL_SERVICE_NAME", "ingestion"))
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_issue("tracing_init_failed", "Tracing init failed", exc)
     # Start prometheus metrics server for ingestion
     try:
         port = int(os.getenv("INGESTION_METRICS_PORT", "8001"))
         ivis_metrics.start_metrics_http_server(port)
         logger.info("Prometheus metrics HTTP server started on port %s", port)
-    except Exception:
-        logger.exception("Failed to start metrics server")
+    except Exception as exc:
+        _record_issue("metrics_server_failed", "Failed to start metrics server", exc)
     
     try:
         rtsp = RTSPClient(conf.rtsp_url)
@@ -157,8 +184,8 @@ def main():
                 try:
                     with ivis_tracing.start_span("ingestion.capture", {"stream_id": conf.stream_id}):
                         pass
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _record_issue("tracing_span_capture_failed", "Tracing span failed (capture)", exc)
             except Exception as exc:
                 metrics.inc_dropped_corrupt()
                 logger.debug("Decode error: %s", exc)
@@ -168,10 +195,7 @@ def main():
                 continue
             
             metrics.inc_captured()
-            try:
-                ivis_metrics.frames_in_total.inc()
-            except Exception:
-                pass
+            _safe_metric("metrics_frames_in_failed", ivis_metrics.frames_in_total.inc)
 
             if not selector.allow(packet.pts):
                 metrics.inc_dropped_fps()
@@ -182,8 +206,8 @@ def main():
             try:
                 with ivis_tracing.start_span("ingestion.normalize", {"stream_id": conf.stream_id}):
                     pass
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_issue("tracing_span_normalize_failed", "Tracing span failed (normalize)", exc)
             fingerprint = anchor.generate(clean_frame)
             identity = FrameIdentity(conf.stream_id, packet.pts, fingerprint)
             # Measure SHM write latency
@@ -194,14 +218,12 @@ def main():
                 try:
                     with ivis_tracing.start_span("ingestion.shm_write", {"frame_id": identity.frame_id, "stream_id": identity.stream_id}):
                         ref = writer.write(clean_frame, identity)
-                except Exception:
+                except Exception as exc:
+                    _record_issue("tracing_span_shm_write_failed", "Tracing span failed (shm_write)", exc)
                     # fallback to direct write if tracing wrapper failed
                     ref = writer.write(clean_frame, identity)
                 sw_ms = (time.time() - sw_start) * 1000.0
-                try:
-                    ivis_metrics.shm_write_latency_ms.observe(sw_ms)
-                except Exception:
-                    pass
+                _safe_metric("metrics_shm_write_latency_failed", lambda: ivis_metrics.shm_write_latency_ms.observe(sw_ms))
             except Exception:
                 ref = None
 
@@ -209,42 +231,34 @@ def main():
             try:
                 with ivis_tracing.start_span("ingestion.publish", {"frame_id": identity.frame_id, "stream_id": identity.stream_id}):
                     published = publisher.publish(identity, packet.timestamp_ms, packet.mono_ms, ref)
-            except Exception:
+            except Exception as exc:
+                _record_issue("tracing_span_publish_failed", "Tracing span failed (publish)", exc)
                 # if tracing wrapper fails, attempt publish anyway
                 published = publisher.publish(identity, packet.timestamp_ms, packet.mono_ms, ref)
             if not published:
                 # Frame dropped due to backpressure/lag
                 metrics.inc_dropped_reason("lag")
-                try:
-                    ivis_metrics.frames_dropped_total.labels(reason="lag").inc()
-                except Exception:
-                    pass
+                _safe_metric("metrics_frames_dropped_failed", lambda: ivis_metrics.frames_dropped_total.labels(reason="lag").inc())
                 logger.debug("Dropped frame due to backpressure/lag (stream length exceeded)")
             else:
                 metrics.inc_processed()
-                try:
-                    ivis_metrics.frames_out_total.inc()
-                except Exception:
-                    pass
+                _safe_metric("metrics_frames_out_failed", ivis_metrics.frames_out_total.inc)
             # end-to-end: best-effort observe latency from capture timestamp to now
             try:
                 if packet.timestamp_ms:
                     now_ms = wall_clock_ms()
                     end_ms = latency_ms(now_ms, int(packet.timestamp_ms))
-                    ivis_metrics.end_to_end_latency_ms.observe(end_ms)
-            except Exception:
-                pass
+                    _safe_metric("metrics_end_to_end_latency_failed", lambda: ivis_metrics.end_to_end_latency_ms.observe(end_ms))
+            except Exception as exc:
+                _record_issue("end_to_end_latency_failed", "End-to-end latency calculation failed", exc)
             # Update last-observed redis stream lag metric (best-effort)
             try:
                 if hasattr(publisher, "redis"):
                     xlen = int(publisher.redis.xlen(publisher.stream) or 0)
                     metrics.set_redis_stream_lag(xlen)
-                    try:
-                        ivis_metrics.redis_lag.set(xlen)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                    _safe_metric("metrics_redis_lag_failed", lambda: ivis_metrics.redis_lag.set(xlen))
+            except Exception as exc:
+                _record_issue("redis_lag_query_failed", "Failed to read Redis stream length", exc)
         
         except FatalError as e:
             logger.error("!!! FATAL ERROR !!! %s | Context: %s", getattr(e, 'message', str(e)), getattr(e, 'context', None))
