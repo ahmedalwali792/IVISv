@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ivisv"
+version = "0.1.0"
+description = "IVISv video analytics system"
+readme = "README.md"
+requires-python = ">=3.8"
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4.0",
+    "mypy>=1.8.0",
+    "pytest>=7.0",
+]
+
+[tool.setuptools]
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["ivis*"]
+
+[project.scripts]
+ivis-run-system = "ivis.run_system:main"
+ivis-ingestion = "ivis.ingestion.main:main"
+ivis-detection = "ivis.detection.main:main"
+ivis-ui = "ivis.ui.live_view:main"
+lint = "ivis.devtools:lint"
+typecheck = "ivis.devtools:typecheck"
+test = "ivis.devtools:test"
+
+[tool.ruff]
+target-version = "py38"
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.mypy]
+python_version = "3.8"
+ignore_missing_imports = true
+check_untyped_defs = false
+exclude = "^(ivis/|src/ivis/legacy/)"
+mypy_path = "src"
+follow_imports = "skip"
