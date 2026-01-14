@@ -54,7 +54,7 @@ class SocketPublisher:
             _record_issue("socket_connect_failed", "Socket connect failed", exc)
             self.sock = None
 
-    def publish(self, frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref):
+    def publish(self, frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref, roi_meta=None):
         gen = getattr(memory_ref, "generation", 0)
         contract = _build_contract(
             self.stream_id,
@@ -67,6 +67,7 @@ class SocketPublisher:
             self.frame_width,
             self.frame_height,
             self.frame_color,
+            roi_meta=roi_meta,
         )
         payload = json.dumps(contract) + "\n"
 
@@ -99,7 +100,7 @@ class ZmqPublisher:
         self.socket = self.zmq.Context.instance().socket(self.zmq.PUB)
         self.socket.connect(self.endpoint)
 
-    def publish(self, frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref):
+    def publish(self, frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref, roi_meta=None):
         gen = getattr(memory_ref, "generation", 0)
         contract = _build_contract(
             self.stream_id,
@@ -112,6 +113,7 @@ class ZmqPublisher:
             self.frame_width,
             self.frame_height,
             self.frame_color,
+            roi_meta=roi_meta,
         )
         payload = json.dumps(contract).encode("utf-8")
         self.socket.send(payload)
@@ -143,7 +145,7 @@ class RedisPublisher:
             self.stream_maxlen = 2000
         self._redis_error = getattr(redis.exceptions, "RedisError", Exception)
 
-    def publish(self, frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref):
+    def publish(self, frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref, roi_meta=None):
         gen = getattr(memory_ref, "generation", 0)
         contract = _build_contract(
             self.stream_id,
@@ -156,6 +158,7 @@ class RedisPublisher:
             self.frame_width,
             self.frame_height,
             self.frame_color,
+            roi_meta=roi_meta,
         )
         payload = json.dumps(contract)
         try:
@@ -202,9 +205,9 @@ class CompositePublisher:
     def __init__(self, publishers):
         self.publishers = publishers
 
-    def publish(self, frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref):
+    def publish(self, frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref, roi_meta=None):
         for publisher in self.publishers:
-            publisher.publish(frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref)
+            publisher.publish(frame_identity, packet_timestamp_ms, packet_mono_ms, memory_ref, roi_meta=roi_meta)
 
 
 def _build_contract(
@@ -218,6 +221,7 @@ def _build_contract(
     frame_width,
     frame_height,
     frame_color,
+    roi_meta=None,
 ):
     backend = getattr(memory_ref, "backend_type", "shm_ring_v1")
     memory = FrameMemoryRef(
@@ -242,7 +246,10 @@ def _build_contract(
         frame_dtype="uint8",
         frame_color_space=output_color,
     )
-    return contract.to_dict()
+    payload = contract.to_dict()
+    if roi_meta:
+        payload["roi"] = roi_meta
+    return payload
 
 
 def get_publisher(config):
