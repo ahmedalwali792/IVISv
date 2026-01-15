@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+logs/
+*.log
+
+# Build / packaging
+dist/
+build/
+*.egg-info/
+
+# Test / cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Byte-compiled / other
+*.py[cod]
+*$py.class

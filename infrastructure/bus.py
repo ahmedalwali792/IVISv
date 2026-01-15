@@ -23,7 +23,13 @@ class SimpleBus:
         self.server.listen(5)
         self.clients = []
         self.running = True
-        print(f"[BUS] Listening on {host}:{port}")
+        try:
+            from ivis_logging import setup_logging
+            self.logger = setup_logging("bus")
+        except Exception:
+            import logging
+            self.logger = logging.getLogger("bus")
+        self.logger.info("[BUS] Listening on %s:%s", host, port)
 
     def broadcast(self, sender_socket, message):
         for client in self.clients:
@@ -38,7 +44,7 @@ class SimpleBus:
             self.clients.remove(connection)
 
     def handle_client(self, conn, addr):
-        print(f"[BUS] New connection: {addr}")
+        self.logger.info("[BUS] New connection: %s", addr)
         self.clients.append(conn)
         while self.running:
             try:
@@ -65,6 +71,7 @@ class SimpleBus:
     def stop(self):
         self.running = False
         self.server.close()
+        self.logger.info("[BUS] Stopped")
 
 if __name__ == "__main__":
     bus = SimpleBus()

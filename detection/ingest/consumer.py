@@ -88,6 +88,11 @@ class ZmqFrameConsumer:
         self.socket = ctx.socket(self.zmq.SUB)
         self.socket.connect(self.endpoint)
         self.socket.setsockopt(self.zmq.SUBSCRIBE, b"")
+        try:
+            self.socket.setsockopt(self.zmq.CONFLATE, 1)
+            print("[DETECTION] ZMQ CONFLATE enabled (processing latest frames only)")
+        except Exception:
+            print("[DETECTION] ZMQ CONFLATE not supported (ignoring)")
         print(f"[DETECTION] ZMQ SUB connected to {self.endpoint}")
 
     def __iter__(self):
@@ -102,93 +107,6 @@ class ZmqFrameConsumer:
                 raise FatalError("ZMQ Consumer Error", context={"error": str(e)})
 
 
-class RedisFrameConsumer:
-    def __init__(self, url: str, stream: str, group: str, consumer: str):
-        try:
-            import redis
-        except Exception as exc:
-            raise FatalError("Missing Redis dependency", context={"error": str(exc)}) from exc
-        self.redis = redis.Redis.from_url(url)
-        self._redis_error = getattr(redis.exceptions, "RedisError", Exception)
-        self._redis_response_error = getattr(redis.exceptions, "ResponseError", Exception)
-        self.stream = stream
-        self.group = group
-        self.consumer = consumer
-        self._ensure_group()
-
-    def _ensure_group(self):
-        try:
-            self.redis.xgroup_create(self.stream, self.group, id="0-0", mkstream=True)
-        except self._redis_response_error as exc:
-            if "BUSYGROUP" not in str(exc).upper():
-                _record_issue("redis_group_create_failed", "Redis group create failed", exc)
-                raise FatalError("Redis consumer group create failed", context={"error": str(exc)})
-        except self._redis_error as exc:
-            _record_issue("redis_group_create_failed", "Redis group create failed", exc)
-            raise FatalError("Redis consumer group create failed", context={"error": str(exc)})
-
-    def __iter__(self):
-        while True:
-            try:
-                resp = self.redis.xreadgroup(
-                    self.group,
-                    self.consumer,
-                    {self.stream: ">"},
-                    count=1,
-                    block=5000,
-                )
-                if not resp:
-                    continue
-                _, messages = resp[0]
-                msg_id, fields = messages[0]
-                data = fields.get(b"payload") or fields.get("payload")
-                if data is None:
-                    self.redis.xack(self.stream, self.group, msg_id)
-                    continue
-                if isinstance(data, bytes):
-                    data = data.decode("utf-8")
-                contract = json.loads(data)
-                self.redis.xack(self.stream, self.group, msg_id)
-                yield contract
-            except Exception as e:
-                raise FatalError("Redis Consumer Error", context={"error": str(e)})
-
-
-class RedisPubSubConsumer:
-    def __init__(self, url: str, channel: str):
-        try:
-            import redis
-        except Exception as exc:
-            raise FatalError("Missing Redis dependency", context={"error": str(exc)}) from exc
-        self.redis = redis.Redis.from_url(url)
-        self.channel = channel
-        self.pubsub = self.redis.pubsub()
-        self.pubsub.subscribe(self.channel)
-
-    def __iter__(self):
-        while True:
-            try:
-                message = self.pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                if not message:
-                    continue
-                data = message.get("data")
-                if isinstance(data, bytes):
-                    data = data.decode("utf-8")
-                latest = data
-                while True:
-                    more = self.pubsub.get_message(ignore_subscribe_messages=True, timeout=0.0)
-                    if not more:
-                        break
-                    more_data = more.get("data")
-                    if isinstance(more_data, bytes):
-                        more_data = more_data.decode("utf-8")
-                    latest = more_data
-                contract = json.loads(latest)
-                yield contract
-            except Exception as e:
-                raise FatalError("Redis PubSub Consumer Error", context={"error": str(e)})
-
-
 class FrameConsumer:
     """
     Stage 2 Fix: No internal retry loops on startup. Fail Fast.
@@ -196,38 +114,17 @@ class FrameConsumer:
 
     def __init__(self, host="localhost", port=5555):
         transport = Config.BUS_TRANSPORT.lower()
-        # Production default: Redis Streams. Legacy transports live under ivis.legacy
-        if transport == "redis":
-            # Use XREADGROUP consumer for streams by default
-            if Config.REDIS_MODE.lower() == "pubsub":
-                # Rare fallback: pubsub mode (legacy)
-                self._impl = RedisPubSubConsumer(Config.REDIS_URL, Config.REDIS_CHANNEL)
-            else:
-                self._impl = RedisFrameConsumer(
-                    Config.REDIS_URL,
-                    Config.REDIS_STREAM,
-                    Config.REDIS_GROUP,
-                    Config.REDIS_CONSUMER,
-                )
+        if transport == "zmq":
+            self._impl = ZmqFrameConsumer(Config.ZMQ_SUB_ENDPOINT)
+        elif transport == "tcp":
+            self._impl = TcpFrameConsumer(host=host, port=port)
         else:
-            # Non-Redis transports are considered legacy; import them from ivis.legacy
-            try:
-                from ivis.legacy.detection_ingest_consumer_legacy import (
-                    ZmqFrameConsumer,
-                    TcpFrameConsumer,
-                    RedisPubSubConsumer,
-                )
-            except Exception:
-                raise FatalError("Legacy transport support unavailable")
+            raise FatalError(f"Unsupported BUS_TRANSPORT: {Config.BUS_TRANSPORT}")
 
-            if transport == "zmq":
-                self._impl = ZmqFrameConsumer(Config.ZMQ_SUB_ENDPOINT)
-            elif transport == "tcp":
-                self._impl = TcpFrameConsumer(host=host, port=port)
-            elif transport == "pubsub":
-                self._impl = RedisPubSubConsumer(Config.REDIS_URL, Config.REDIS_CHANNEL)
-            else:
-                raise FatalError(f"Unsupported BUS_TRANSPORT: {Config.BUS_TRANSPORT}")
+    def connect(self):
+        if hasattr(self._impl, "connect"):
+            return self._impl.connect()
+        return None
 
     def __iter__(self):
         return iter(self._impl)

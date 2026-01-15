@@ -17,13 +17,9 @@ class Config:
             "FRAME_WIDTH": {"type": "int", "required": True},
             "FRAME_HEIGHT": {"type": "int", "required": True},
             "MEMORY_BACKEND": {"type": "str", "required": True},
-            "BUS_TRANSPORT": {"type": "str", "default": "redis"},
+            "BUS_TRANSPORT": {"type": "str", "default": "zmq"},
             "ZMQ_PUB_ENDPOINT": {"type": "str", "default": "tcp://localhost:5555"},
-            "REDIS_URL": {"type": "str", "default": "redis://localhost:6379/0"},
-            "REDIS_STREAM": {"type": "str", "default": "ivis:frames"},
-            "REDIS_MODE": {"type": "str", "default": "streams"},
-            "REDIS_CHANNEL": {"type": "str", "default": "ivis:frames"},
-            "REDIS_RESULTS_CHANNEL": {"type": "str", "default": "ivis:results"},
+            "ZMQ_RESULTS_SUB_ENDPOINT": {"type": "str", "default": "tcp://localhost:5557"},
             # SOURCE_COLOR is the color of the raw source (camera/file). Ingestion
             # will convert from SOURCE_COLOR -> FRAME_COLOR_SPACE for downstream.
             "SOURCE_COLOR": {"type": "str", "default": None},
@@ -31,6 +27,7 @@ class Config:
             "SHM_NAME": {"type": "str", "default": "ivis_shm_data"},
             "SHM_META_NAME": {"type": "str", "default": "ivis_shm_meta"},
             "SHM_BUFFER_BYTES": {"type": "int", "default": 50000000},
+            "SHM_CACHE_SECONDS": {"type": "float", "default": 30.0},
             "SELECTOR_MODE": {"type": "str", "default": "clock"},
             "ADAPTIVE_FPS": {"type": "bool", "default": False},
             "ADAPTIVE_MIN_FPS": {"type": "float", "default": 5},
@@ -47,7 +44,6 @@ class Config:
             "RTSP_FROZEN_HASH_COUNT": {"type": "int", "default": 30},
             "RTSP_FROZEN_PTS_COUNT": {"type": "int", "default": 30},
             "RTSP_FROZEN_TIMESTAMP_COUNT": {"type": "int", "default": 30},
-            "HEALTH_STREAM": {"type": "str", "default": "ivis:health"},
             "HEALTH_INTERVAL_SEC": {"type": "float", "default": 5.0},
             "ADAPTIVE_LAG_THRESHOLD": {"type": "int", "default": 2000},
             "ADAPTIVE_LAG_HYSTERESIS": {"type": "float", "default": 0.2},
@@ -75,11 +71,7 @@ class Config:
         self.memory_backend = values["MEMORY_BACKEND"]
         self.bus_transport = values["BUS_TRANSPORT"]
         self.zmq_pub_endpoint = values["ZMQ_PUB_ENDPOINT"]
-        self.redis_url = values["REDIS_URL"]
-        self.redis_stream = values["REDIS_STREAM"]
-        self.redis_mode = values["REDIS_MODE"]
-        self.redis_channel = values["REDIS_CHANNEL"]
-        self.redis_results_channel = values["REDIS_RESULTS_CHANNEL"]
+        self.zmq_results_sub_endpoint = values["ZMQ_RESULTS_SUB_ENDPOINT"]
         # Prefer SOURCE_COLOR (new); fall back to FRAME_COLOR legacy variable.
         src_col = values.get("SOURCE_COLOR")
         if src_col:
@@ -101,6 +93,11 @@ class Config:
         self.shm_name = values["SHM_NAME"]
         self.shm_meta_name = values["SHM_META_NAME"]
         self.shm_buffer_bytes = values["SHM_BUFFER_BYTES"]
+        self.shm_cache_seconds = values["SHM_CACHE_SECONDS"]
+        if os.getenv("SHM_BUFFER_BYTES") is None and self.shm_cache_seconds > 0:
+            slot_size = self.frame_width * self.frame_height * 3
+            slots = max(1, int(self.target_fps * self.shm_cache_seconds))
+            self.shm_buffer_bytes = slot_size * slots
         self.selector_mode = values["SELECTOR_MODE"].lower()
         self.adaptive_fps = values["ADAPTIVE_FPS"]
         self.adaptive_min_fps = values["ADAPTIVE_MIN_FPS"]
@@ -123,7 +120,6 @@ class Config:
         self.rtsp_frozen_hash_count = values["RTSP_FROZEN_HASH_COUNT"]
         self.rtsp_frozen_pts_count = values["RTSP_FROZEN_PTS_COUNT"]
         self.rtsp_frozen_timestamp_count = values["RTSP_FROZEN_TIMESTAMP_COUNT"]
-        self.health_stream = values["HEALTH_STREAM"]
         self.health_interval_sec = values["HEALTH_INTERVAL_SEC"]
         self.adaptive_lag_threshold = values["ADAPTIVE_LAG_THRESHOLD"]
         self.adaptive_lag_hysteresis = values["ADAPTIVE_LAG_HYSTERESIS"]
@@ -146,6 +142,8 @@ class Config:
             raise ConfigError("Invalid SHM_BUFFER_BYTES", context={"value": self.shm_buffer_bytes})
         if self.selector_mode not in ("clock", "pts"):
             raise ConfigError("Invalid SELECTOR_MODE", context={"value": self.selector_mode})
+        if self.shm_cache_seconds < 0:
+            raise ConfigError("Invalid SHM_CACHE_SECONDS", context={"value": self.shm_cache_seconds})
         if self.rtsp_max_retries < 0:
             raise ConfigError("Invalid RTSP_MAX_RETRIES", context={"value": self.rtsp_max_retries})
         if self.rtsp_retry_backoff_sec < 0:

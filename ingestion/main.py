@@ -10,6 +10,7 @@ logger = setup_logging("ingestion")
 import ivis_metrics
 import ivis_tracing
 from ivis.common.time_utils import latency_ms, wall_clock_ms, monotonic_ms
+from ivis_health import ServiceState, HealthServer
 
 from ingestion.capture.decoder import Decoder
 from ingestion.capture.frozen import FrozenStreamDetector
@@ -21,7 +22,6 @@ from ingestion.errors.fatal import ConfigError, FatalError
 from ingestion.frame.anchor import Anchor
 from ingestion.frame.id import FrameIdentity
 from ingestion.frame.normalizer import Normalizer
-from ingestion.feedback.lag_controller import LagBasedRateController
 from ingestion.frame.roi import apply_mask, build_mask, parse_boxes, parse_polygons
 from ingestion.frame.selector import Selector
 from ingestion.heartbeat import Heartbeat
@@ -76,6 +76,12 @@ def main():
         sys.exit(1)
     logger.info("Config summary: %s", conf.summary())
 
+    health_host = os.getenv("HEALTH_BIND", "127.0.0.1")
+    health_port = int(os.getenv("INGESTION_HEALTH_PORT", "9001"))
+    state = ServiceState("ingestion")
+    HealthServer(state, host=health_host, port=health_port).start_in_thread()
+    state.set_check("config_loaded", True, details={"stream_id": conf.stream_id, "camera_id": conf.camera_id})
+
     runtime = Runtime()
     metrics = Metrics()
     # initialize tracing (best-effort)
@@ -114,13 +120,21 @@ def main():
         # --- Backend Selection (Strict) ---
         if conf.memory_backend == "shm":
             slot_size = conf.frame_width * conf.frame_height * 3
-            slot_count = max(1, conf.shm_buffer_bytes // slot_size)
+            if conf.shm_cache_seconds and conf.shm_cache_seconds > 0:
+                slot_count = max(1, int(conf.target_fps * conf.shm_cache_seconds))
+            else:
+                slot_count = max(1, conf.shm_buffer_bytes // slot_size)
             logger.info(
                 "[Topology] Using Shared Memory Ring (slots=%s, size=%s)",
                 slot_count,
                 slot_size,
             )
             backend_impl = ShmRingBackend(conf.shm_name, conf.shm_meta_name, slot_size, slot_count)
+            state.set_check(
+                "shm_ready",
+                True,
+                details={"shm_name": conf.shm_name, "shm_meta_name": conf.shm_meta_name, "slot_size": slot_size, "slot_count": slot_count},
+            )
         else:
             raise FatalError(f"Unsupported MEMORY_BACKEND for Stage 3: {conf.memory_backend}")
 
@@ -130,6 +144,11 @@ def main():
         if IPC_AVAILABLE:
             logger.info("[Topology] Using Publisher transport: %s", conf.bus_transport)
             publisher = get_publisher(conf)
+            state.set_check(
+                "bus_ready",
+                True,
+                details={"transport": conf.bus_transport, "endpoint": getattr(conf, "zmq_pub_endpoint", None)},
+            )
         else:
             raise FatalError("IPC modules missing, cannot start Publisher")
 
@@ -140,31 +159,10 @@ def main():
                 conf.adaptive_max_fps,
                 conf.adaptive_safety,
             )
-            controller.start(conf.redis_url, conf.redis_mode, conf.redis_results_channel)
-            logger.info(
-                "Adaptive FPS enabled (mode=%s, channel=%s).",
-                conf.redis_mode,
-                conf.redis_results_channel,
-            )
+            controller.start(conf.zmq_results_sub_endpoint)
+            logger.info("Adaptive FPS enabled (results endpoint=%s).", conf.zmq_results_sub_endpoint)
 
-        lag_controller = None
-        if conf.adaptive_fps and conf.adaptive_lag_threshold > 0:
-            lag_controller = LagBasedRateController(
-                selector,
-                conf.adaptive_min_fps,
-                conf.adaptive_max_fps,
-                conf.adaptive_lag_threshold,
-                conf.adaptive_lag_hysteresis,
-            )
-            logger.info("Adaptive lag policy enabled (threshold=%s).", conf.adaptive_lag_threshold)
-
-        heartbeat = Heartbeat(
-            conf.stream_id,
-            conf.camera_id,
-            conf.redis_url,
-            conf.health_stream,
-            conf.health_interval_sec,
-        )
+        heartbeat = Heartbeat(conf.stream_id, conf.camera_id, conf.health_interval_sec)
 
         reconnect = ReconnectController(
             conf.rtsp_reconnect_min_sec,
@@ -194,6 +192,8 @@ def main():
             logger.info("Recording buffer enabled (seconds=%s, max_frames=%s).", conf.record_buffer_seconds, max_frames)
         
         rtsp.connect()
+        state.set_check("source_ready", True, details={"rtsp_url": conf.rtsp_url})
+        state.compute_ready(["config_loaded", "shm_ready", "bus_ready", "source_ready"])
 
     except FatalError as e:
         logger.error("FATAL: Startup Failed - %s", e.message)
@@ -224,6 +224,7 @@ def main():
 
     while runtime.should_continue():
         try:
+            state.touch_loop()
             heartbeat.tick()
 
             packet = reader.next_packet()
@@ -315,6 +316,11 @@ def main():
             except Exception:
                 ref = None
 
+            if ref is not None:
+                state.inc("frames_written", 1)
+                state.set_meta("last_frame_id", identity.frame_id)
+                state.set_meta("last_shm_write_ts", time.time())
+
             # publish span
             try:
                 with ivis_tracing.start_span("ingestion.publish", {"frame_id": identity.frame_id, "stream_id": identity.stream_id}):
@@ -324,12 +330,16 @@ def main():
                 # if tracing wrapper fails, attempt publish anyway
                 published = publisher.publish(identity, packet.timestamp_ms, packet.mono_ms, ref, roi_meta=roi_meta)
             if not published:
+                state.set_check("bus_active", False, reason="publish_failed")
                 # Frame dropped due to backpressure/lag
                 metrics.inc_dropped_reason("lag")
                 _safe_metric("metrics_frames_dropped_failed", lambda: ivis_metrics.frames_dropped_total.labels(reason="lag").inc())
                 _safe_metric("metrics_drops_total_failed", lambda: ivis_metrics.drops_total.labels(reason="lag").inc())
                 logger.debug("Dropped frame due to backpressure/lag (stream length exceeded)")
             else:
+                state.inc("frames_published", 1)
+                state.set_check("bus_active", True)
+                state.set_meta("last_publish_ts", time.time())
                 metrics.inc_processed()
                 _safe_metric("metrics_frames_out_failed", ivis_metrics.frames_out_total.inc)
             # end-to-end: best-effort observe latency from capture timestamp to now
@@ -340,20 +350,12 @@ def main():
                     _safe_metric("metrics_end_to_end_latency_failed", lambda: ivis_metrics.end_to_end_latency_ms.observe(end_ms))
             except Exception as exc:
                 _record_issue("end_to_end_latency_failed", "End-to-end latency calculation failed", exc)
-            # Update last-observed redis stream lag metric (best-effort)
-            try:
-                if hasattr(publisher, "redis"):
-                    xlen = int(publisher.redis.xlen(publisher.stream) or 0)
-                    metrics.set_redis_stream_lag(xlen)
-                    _safe_metric("metrics_redis_lag_failed", lambda: ivis_metrics.redis_lag.set(xlen))
-                    if lag_controller is not None:
-                        if lag_controller.update(xlen):
-                            logger.info("Adaptive FPS lag cap updated (target_fps=%s).", selector.target_fps)
-            except Exception as exc:
-                _record_issue("redis_lag_query_failed", "Failed to read Redis stream length", exc)
+            # No external lag source when running without a broker
             _safe_metric("metrics_adaptive_fps_failed", lambda: ivis_metrics.adaptive_fps_current.set(selector.target_fps))
         
         except FatalError as e:
+            state.set_error("fatal_error", e, context=getattr(e, "context", None))
+            state.set_ready(False)
             logger.error("!!! FATAL ERROR !!! %s | Context: %s", getattr(e, 'message', str(e)), getattr(e, 'context', None))
             break
 

@@ -7,8 +7,11 @@ import os
 import json
 
 from memory.runtime import Runtime
+from ivis_logging import setup_logging
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+logger = setup_logging("memory")
+
+
 
 # Global Init - If this fails, script dies (Stage 2 compliant)
 try:
@@ -16,7 +19,7 @@ try:
     runtime.initialize()
     backend = runtime.get_backend()
 except Exception as e:
-    print(f"FATAL: Memory Service Init Failed - {e}")
+    logger.error("FATAL: Memory Service Init Failed - %s", str(e))
     sys.exit(1)
 
 class MemoryRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -60,16 +63,41 @@ class MemoryRequestHandler(http.server.BaseHTTPRequestHandler):
         except Exception:
              self.send_error(500, "Internal Server Error")
 
+    def do_HEAD(self):
+        # Support simple health probes via HEAD /health
+        if self.path.strip("/") == "health":
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            return
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        # Add a simple JSON health endpoint at POST /health (optional)
+        if self.path.strip("/") == "health":
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok"}).encode())
+            return
+        self.send_error(404)
+
     def log_message(self, format, *args):
-        pass
+        # suppress default http.server logging
+        return
 
 PORT = 6000
 
 if __name__ == "__main__":
     socketserver.TCPServer.allow_reuse_address = True
     try:
-        with socketserver.TCPServer(("", PORT), MemoryRequestHandler) as httpd:
-            print(f"[MEMORY SERVER] Running on port {PORT} (Strict Mode)")
+        class ThreadingHTTPServer(socketserver.ThreadingTCPServer):
+            daemon_threads = True
+            allow_reuse_address = True
+
+        with ThreadingHTTPServer(("", PORT), MemoryRequestHandler) as httpd:
+            print(f"[MEMORY SERVER] Running on port {PORT} (Threaded)")
             httpd.serve_forever()
     except KeyboardInterrupt:
         sys.exit(0)

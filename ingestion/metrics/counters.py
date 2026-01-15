@@ -11,8 +11,6 @@ class Metrics:
         self.write_failures = 0
         # per-reason drops
         self.frames_dropped_by_reason = {}
-        # redis stream lag (last observed)
-        self.redis_stream_lag = 0
 
     def inc_captured(self): self.frames_captured += 1
     def inc_dropped_fps(self): self.dropped_fps += 1
@@ -24,9 +22,3 @@ class Metrics:
         if not isinstance(reason, str) or not reason:
             reason = "unspecified"
         self.frames_dropped_by_reason[reason] = self.frames_dropped_by_reason.get(reason, 0) + 1
-    def set_redis_stream_lag(self, value: int):
-        try:
-            self.redis_stream_lag = int(value)
-        except (TypeError, ValueError) as exc:
-            import logging
-            logging.getLogger("ingestion").warning("Invalid redis stream lag value: %s", exc)

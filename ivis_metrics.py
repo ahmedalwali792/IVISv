@@ -20,7 +20,6 @@ end_to_end_latency_ms = Histogram("end_to_end_latency_ms", "End-to-end latency (
 # Gauges
 fps_in = Gauge("fps_in", "Input frames per second (approx)")
 fps_out = Gauge("fps_out", "Output frames per second (displayed)")
-redis_lag = Gauge("redis_lag", "Approximate Redis stream length / lag")
 adaptive_fps_current = Gauge("adaptive_fps_current", "Current adaptive FPS target")
 ui_results_cache_size = Gauge("ui_results_cache_size", "UI results cache size")
 record_buffer_size = Gauge("record_buffer_size", "Recording buffer size (frames)")

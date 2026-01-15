@@ -1,0 +1,5 @@
+# Dependencies lock (minimal) — reflect YAML decision
+# PyYAML pinned so orchestrator can load YAML config files
+PyYAML==6.0.3
+
+# Other runtime deps remain managed via requirements.txt (unpinned in this project)

@@ -20,16 +20,14 @@ import ivis_metrics
 import ivis_tracing
 
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-FRAMES_STREAM = os.getenv("REDIS_STREAM", "ivis:frames")
-RESULTS_STREAM = os.getenv("REDIS_RESULTS_STREAM", "ivis:results")
-REDIS_MODE = os.getenv("REDIS_MODE", "streams").lower()
-REDIS_CHANNEL = os.getenv("REDIS_CHANNEL", "ivis:frames")
-REDIS_RESULTS_CHANNEL = os.getenv("REDIS_RESULTS_CHANNEL", "ivis:results")
+ZMQ_SUB_ENDPOINT = os.getenv("ZMQ_SUB_ENDPOINT", "tcp://localhost:5555")
+ZMQ_RESULTS_SUB_ENDPOINT = os.getenv("ZMQ_RESULTS_SUB_ENDPOINT", "tcp://localhost:5557")
 
 SHM_NAME = os.getenv("SHM_NAME", "ivis_shm_data")
 SHM_META_NAME = os.getenv("SHM_META_NAME", "ivis_shm_meta")
 SHM_BUFFER_BYTES = int(os.getenv("SHM_BUFFER_BYTES", "50000000"))
+SHM_CACHE_SECONDS = float(os.getenv("SHM_CACHE_SECONDS", "0"))
+SHM_CACHE_FPS = float(os.getenv("SHM_CACHE_FPS", "0"))
 
 FRAME_WIDTH = int(os.getenv("FRAME_WIDTH", "640"))
 FRAME_HEIGHT = int(os.getenv("FRAME_HEIGHT", "480"))
@@ -119,7 +117,10 @@ def _get_ring():
     global shm_ring, last_shm_error, active_shm_name
     if shm_ring is None:
         slot_size = FRAME_WIDTH * FRAME_HEIGHT * 3
-        slot_count = max(1, SHM_BUFFER_BYTES // slot_size)
+        if SHM_CACHE_SECONDS > 0 and SHM_CACHE_FPS > 0:
+            slot_count = max(1, int(SHM_CACHE_SECONDS * SHM_CACHE_FPS))
+        else:
+            slot_count = max(1, SHM_BUFFER_BYTES // slot_size)
         candidates = [
             (SHM_NAME, SHM_META_NAME),
             (f"ivis_shm_data_{slot_size}_{slot_count}", f"ivis_shm_meta_{slot_size}_{slot_count}"),
@@ -141,6 +142,8 @@ def _get_ring():
 
 
 def _overlay(frame_bgr: np.ndarray, result: dict, fps_value: float) -> np.ndarray:
+    if not result.get("detections") and not result.get("tracks"):
+         logger.debug("Overlay: No detections/tracks in result for overlay")
     timing = result.get("timing", {})
     inference_ms = timing.get("inference_ms")
     model_ms = timing.get("model_ms")
@@ -222,57 +225,24 @@ def _overlay(frame_bgr: np.ndarray, result: dict, fps_value: float) -> np.ndarra
 
 def _frame_loop():
     try:
-        import redis
+        import zmq
     except Exception as exc:
-        raise RuntimeError(f"Missing Redis dependency: {exc}") from exc
+        raise RuntimeError(f"Missing ZeroMQ dependency: {exc}") from exc
 
-    r = redis.Redis.from_url(REDIS_URL)
-    last_id = "0-0"
+    ctx = zmq.Context.instance()
+    socket = ctx.socket(zmq.SUB)
+    socket.connect(ZMQ_SUB_ENDPOINT)
+    socket.setsockopt(zmq.SUBSCRIBE, b"")
     while True:
         try:
-            if REDIS_MODE == "pubsub":
-                pubsub = r.pubsub()
-                pubsub.subscribe(REDIS_CHANNEL)
-                while True:
-                    message = pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                    if not message:
-                        continue
-                    payload = message.get("data")
-                    if isinstance(payload, bytes):
-                        payload = payload.decode("utf-8")
-                    try:
-                        contract = json.loads(payload)
-                        logger.debug("Received contract via pubsub: %s", contract.get("frame_id"))
-                        try:
-                            with ivis_tracing.start_span("ui.consume", {"frame_id": contract.get("frame_id"), "stream_id": contract.get("stream_id")}):
-                                _handle_contract(contract)
-                        except Exception:
-                            _handle_contract(contract)
-                    except Exception:
-                        logger.exception("Failed to handle pubsub contract")
-            else:
-                resp = r.xread({FRAMES_STREAM: last_id}, block=5000, count=1)
-                if not resp:
-                    continue
-                _, messages = resp[0]
-                msg_id, fields = messages[0]
-                last_id = msg_id
-                payload = fields.get(b"payload") or fields.get("payload")
-                if payload is None:
-                    continue
-                if isinstance(payload, bytes):
-                    payload = payload.decode("utf-8")
-                if isinstance(payload, str):
-                    try:
-                        contract = json.loads(payload)
-                        logger.debug("Received contract via stream: %s", contract.get("frame_id"))
-                        try:
-                            with ivis_tracing.start_span("ui.consume", {"frame_id": contract.get("frame_id"), "stream_id": contract.get("stream_id")}):
-                                _handle_contract(contract)
-                        except Exception:
-                            _handle_contract(contract)
-                    except Exception:
-                        logger.exception("Failed to handle stream contract")
+            payload = socket.recv()
+            contract = json.loads(payload.decode("utf-8"))
+            logger.debug("Received contract via ZMQ: %s", contract.get("frame_id"))
+            try:
+                with ivis_tracing.start_span("ui.consume", {"frame_id": contract.get("frame_id"), "stream_id": contract.get("stream_id")}):
+                    _handle_contract(contract)
+            except Exception:
+                _handle_contract(contract)
         except Exception as exc:
             _record_issue("ui_frame_loop_failed", "Frame loop error", exc)
             time.sleep(0.1)
@@ -280,73 +250,39 @@ def _frame_loop():
 
 def _results_loop():
     try:
-        import redis
+        import zmq
     except Exception as exc:
-        raise RuntimeError(f"Missing Redis dependency: {exc}") from exc
+        raise RuntimeError(f"Missing ZeroMQ dependency: {exc}") from exc
 
     global last_result
-    r = redis.Redis.from_url(REDIS_URL)
-    last_id = "0-0"
+    ctx = zmq.Context.instance()
+    socket = ctx.socket(zmq.SUB)
+    socket.connect(ZMQ_RESULTS_SUB_ENDPOINT)
+    socket.setsockopt(zmq.SUBSCRIBE, b"")
     while True:
         try:
-            if REDIS_MODE == "pubsub":
-                pubsub = r.pubsub()
-                pubsub.subscribe(REDIS_RESULTS_CHANNEL)
-                while True:
-                    message = pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                    if not message:
-                        continue
-                    payload = message.get("data")
-                    if isinstance(payload, bytes):
-                        payload = payload.decode("utf-8")
-                    try:
-                        result = json.loads(payload)
-                        # Validate result contract v1
-                        try:
-                            validate_result_contract_v1(result)
-                        except ContractValidationError as exc:
-                            detection_metrics.inc_dropped_reason(getattr(exc, "reason_code", "result_validation_failed"))
-                            logger.debug("Dropped result from stream: %s", getattr(exc, "message", str(exc)))
-                            continue
-                        frame_id = result.get("frame_id")
-                        if frame_id:
-                            _cache_set(frame_id, result)
-                            last_result = result
-                    except Exception:
-                        logger.exception("Failed to parse/handle result payload")
-            else:
-                resp = r.xread({RESULTS_STREAM: last_id}, block=5000, count=1)
-                if not resp:
-                    continue
-                _, messages = resp[0]
-                msg_id, fields = messages[0]
-                last_id = msg_id
-                payload = fields.get(b"payload") or fields.get("payload")
-                if payload is None:
-                    continue
-                if isinstance(payload, bytes):
-                    payload = payload.decode("utf-8")
-                if isinstance(payload, str):
-                    try:
-                        result = json.loads(payload)
-                        try:
-                            validate_result_contract_v1(result)
-                        except ContractValidationError as exc:
-                            detection_metrics.inc_dropped_reason(getattr(exc, "reason_code", "result_validation_failed"))
-                            logger.debug("Dropped result from stream: %s", getattr(exc, "message", str(exc)))
-                            continue
-                        frame_id = result.get("frame_id")
-                        if frame_id:
-                            _cache_set(frame_id, result)
-                            last_result = result
-                    except Exception:
-                        logger.exception("Failed to parse/handle result payload")
+            payload = socket.recv()
+            result = json.loads(payload.decode("utf-8"))
+            try:
+                validate_result_contract_v1(result)
+            except ContractValidationError as exc:
+                detection_metrics.inc_dropped_reason(getattr(exc, "reason_code", "result_validation_failed"))
+                logger.debug("Dropped result from ZMQ: %s", getattr(exc, "message", str(exc)))
+                continue
+            frame_id = result.get("frame_id")
+            if frame_id:
+                _cache_set(frame_id, result)
+                last_result = result
+                logger.debug("DEBUG: Cached result for frame %s (ts=%s)", frame_id, result.get("timestamp_ms"))
         except Exception as exc:
             _record_issue("ui_results_loop_failed", "Results loop error", exc)
             time.sleep(0.1)
+            
+
 
 
 def _handle_contract(contract: dict):
+    global last_contract_ts, last_shm_ts
     mem = contract.get("memory", {})
     key = mem.get("key")
     gen = mem.get("generation", 0)
@@ -434,8 +370,8 @@ def _handle_contract(contract: dict):
         global latest_frame, latest_meta
         latest_frame = frame_bgr
         latest_meta = contract
-        global last_contract_ts
         last_contract_ts = time.perf_counter()
+        last_shm_ts = time.perf_counter()
 
 
 def _shm_fallback_loop():
@@ -571,15 +507,13 @@ def main():
         "Config summary: %s",
         redact_config(
             {
-                "REDIS_URL": REDIS_URL,
-                "REDIS_STREAM": FRAMES_STREAM,
-                "REDIS_RESULTS_STREAM": RESULTS_STREAM,
-                "REDIS_MODE": REDIS_MODE,
-                "REDIS_CHANNEL": REDIS_CHANNEL,
-                "REDIS_RESULTS_CHANNEL": REDIS_RESULTS_CHANNEL,
+                "ZMQ_SUB_ENDPOINT": ZMQ_SUB_ENDPOINT,
+                "ZMQ_RESULTS_SUB_ENDPOINT": ZMQ_RESULTS_SUB_ENDPOINT,
                 "SHM_NAME": SHM_NAME,
                 "SHM_META_NAME": SHM_META_NAME,
                 "SHM_BUFFER_BYTES": SHM_BUFFER_BYTES,
+                "SHM_CACHE_SECONDS": SHM_CACHE_SECONDS,
+                "SHM_CACHE_FPS": SHM_CACHE_FPS,
                 "FRAME_WIDTH": FRAME_WIDTH,
                 "FRAME_HEIGHT": FRAME_HEIGHT,
                 "FRAME_COLOR_SPACE": FRAME_COLOR_SPACE,

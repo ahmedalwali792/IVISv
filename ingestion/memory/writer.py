@@ -11,9 +11,11 @@ class Writer:
     def write(self, frame_data, identity):
         try:
             key = identity.frame_id
-            data_bytes = frame_data.tobytes()
-            
-            ref = self.backend.put(key, data_bytes)
+            if hasattr(self.backend, "put_frame"):
+                ref = self.backend.put_frame(key, frame_data)
+            else:
+                data_bytes = frame_data.tobytes()
+                ref = self.backend.put(key, data_bytes)
             
             if not isinstance(ref, MemoryReference):
                  raise MemoryWriteError(

@@ -22,17 +22,10 @@ _SCHEMA = {
     "REID_MODEL_NAME": {"type": "str", "default": "osnet_x0_25"},
     "REID_MODEL_PATH": {"type": "str", "default": None},
     "REID_ALLOW_FALLBACK": {"type": "bool", "default": False},
-    "BUS_TRANSPORT": {"type": "str", "default": "redis"},
+    "BUS_TRANSPORT": {"type": "str", "default": "zmq"},
     "ZMQ_PUB_ENDPOINT": {"type": "str", "default": "tcp://localhost:5555"},
     "ZMQ_SUB_ENDPOINT": {"type": "str", "default": "tcp://localhost:5555"},
-    "REDIS_URL": {"type": "str", "default": "redis://localhost:6379/0"},
-    "REDIS_STREAM": {"type": "str", "default": "ivis:frames"},
-    "REDIS_RESULTS_STREAM": {"type": "str", "default": "ivis:results"},
-    "REDIS_MODE": {"type": "str", "default": "streams"},
-    "REDIS_CHANNEL": {"type": "str", "default": "ivis:frames"},
-    "REDIS_RESULTS_CHANNEL": {"type": "str", "default": "ivis:results"},
-    "REDIS_GROUP": {"type": "str", "default": "ivis:detection"},
-    "REDIS_CONSUMER": {"type": "str", "default": "detector-1"},
+    "ZMQ_RESULTS_PUB_ENDPOINT": {"type": "str", "default": "tcp://localhost:5557"},
     "POSTGRES_DSN": {"type": "str", "default": None},
     "FRAME_WIDTH": {"type": "int", "default": 640},
     "FRAME_HEIGHT": {"type": "int", "default": 480},
@@ -41,6 +34,8 @@ _SCHEMA = {
     "SHM_NAME": {"type": "str", "default": "ivis_shm_data"},
     "SHM_META_NAME": {"type": "str", "default": "ivis_shm_meta"},
     "SHM_BUFFER_BYTES": {"type": "int", "default": 50000000},
+    "SHM_CACHE_SECONDS": {"type": "float", "default": 0},
+    "SHM_CACHE_FPS": {"type": "float", "default": 0},
     "MAX_FRAME_AGE_MS": {"type": "int", "default": 1000},
     "DEBUG": {"type": "bool", "default": False},
 }
@@ -83,19 +78,11 @@ class Config:
     REID_MODEL_PATH = _VALUES["REID_MODEL_PATH"]
     REID_ALLOW_FALLBACK = _VALUES["REID_ALLOW_FALLBACK"]
 
-    # Bus transport: zmq | redis | tcp
+    # Bus transport: zmq | tcp
     BUS_TRANSPORT = _VALUES["BUS_TRANSPORT"]
     ZMQ_PUB_ENDPOINT = _VALUES["ZMQ_PUB_ENDPOINT"]
     ZMQ_SUB_ENDPOINT = _VALUES["ZMQ_SUB_ENDPOINT"]
-
-    REDIS_URL = _VALUES["REDIS_URL"]
-    REDIS_STREAM = _VALUES["REDIS_STREAM"]
-    REDIS_RESULTS_STREAM = _VALUES["REDIS_RESULTS_STREAM"]
-    REDIS_MODE = _VALUES["REDIS_MODE"]
-    REDIS_CHANNEL = _VALUES["REDIS_CHANNEL"]
-    REDIS_RESULTS_CHANNEL = _VALUES["REDIS_RESULTS_CHANNEL"]
-    REDIS_GROUP = _VALUES["REDIS_GROUP"]
-    REDIS_CONSUMER = _VALUES["REDIS_CONSUMER"]
+    ZMQ_RESULTS_PUB_ENDPOINT = _VALUES["ZMQ_RESULTS_PUB_ENDPOINT"]
 
     # Persistence
     POSTGRES_DSN = _VALUES["POSTGRES_DSN"]
@@ -109,6 +96,8 @@ class Config:
     SHM_NAME = _VALUES["SHM_NAME"]
     SHM_META_NAME = _VALUES["SHM_META_NAME"]
     SHM_BUFFER_BYTES = _VALUES["SHM_BUFFER_BYTES"]
+    SHM_CACHE_SECONDS = _VALUES["SHM_CACHE_SECONDS"]
+    SHM_CACHE_FPS = _VALUES["SHM_CACHE_FPS"]
     MAX_FRAME_AGE_MS = _VALUES["MAX_FRAME_AGE_MS"]
 
     DEBUG = _VALUES["DEBUG"]

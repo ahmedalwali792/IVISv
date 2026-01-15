@@ -56,38 +56,24 @@ class PostgresWriter:
             )
 
 
-class RedisResultWriter:
-    def __init__(self, url: str, stream: str, mode: str, channel: str):
+class ZmqResultWriter:
+    def __init__(self, endpoint: str):
         try:
-            import redis
+            import zmq
         except Exception as exc:
-            raise FatalError("Missing Redis dependency", context={"error": str(exc)}) from exc
-        self.redis = redis.Redis.from_url(url)
-        self.stream = stream
-        self.mode = mode.lower()
-        self.channel = channel
-        import os
-        try:
-            self.stream_maxlen = int(os.getenv("REDIS_RESULTS_STREAM_MAXLEN", "2000"))
-        except Exception:
-            self.stream_maxlen = 2000
+            raise FatalError("Missing ZeroMQ dependency", context={"error": str(exc)}) from exc
+        self.zmq = zmq
+        self.endpoint = endpoint
+        self.socket = self.zmq.Context.instance().socket(self.zmq.PUB)
+        self.socket.bind(self.endpoint)
 
     def write(self, result: dict):
-        payload = json.dumps(result)
+        payload = json.dumps(result).encode("utf-8")
         try:
-            if self.mode == "pubsub":
-                self.redis.publish(self.channel, payload)
-            else:
-                # Append result then trim to retention window to avoid unbounded growth
-                self.redis.xadd(self.stream, {"payload": payload})
-                try:
-                    self.redis.xtrim(self.stream, maxlen=self.stream_maxlen, approximate=False)
-                except Exception:
-                    # Best-effort trimming; don't fail publish on trim errors
-                    pass
+            self.socket.send(payload)
         except Exception as exc:
             import logging
-            logging.getLogger("detection").error("Redis results publish failed: %s", exc)
+            logging.getLogger("detection").error("ZMQ results publish failed: %s", exc)
             return
 
 
@@ -95,24 +81,19 @@ class ResultPublisher:
     def __init__(self):
         self.logger = setup_logging("detection")
         self.pg_writer = None
-        self.redis_writer = None
+        self.zmq_writer = None
         if Config.POSTGRES_DSN:
             try:
                 self.pg_writer = PostgresWriter(Config.POSTGRES_DSN)
                 self.logger.info("Postgres writer enabled.")
             except Exception as exc:
                 self.logger.error("Postgres writer disabled: %s", exc)
-        if Config.REDIS_URL and Config.REDIS_RESULTS_STREAM:
+        if Config.ZMQ_RESULTS_PUB_ENDPOINT:
             try:
-                self.redis_writer = RedisResultWriter(
-                    Config.REDIS_URL,
-                    Config.REDIS_RESULTS_STREAM,
-                    Config.REDIS_MODE,
-                    Config.REDIS_RESULTS_CHANNEL,
-                )
-                self.logger.info("Redis results stream enabled.")
+                self.zmq_writer = ZmqResultWriter(Config.ZMQ_RESULTS_PUB_ENDPOINT)
+                self.logger.info("ZMQ results publisher enabled.")
             except Exception as exc:
-                self.logger.error("Redis results stream disabled: %s", exc)
+                self.logger.error("ZMQ results publisher disabled: %s", exc)
 
     def publish(self, result: dict):
         # Populate model metadata
@@ -143,7 +124,7 @@ class ResultPublisher:
             print(f"[RESULT] {payload}")
             if self.pg_writer:
                 self.pg_writer.write(result)
-            if self.redis_writer:
-                self.redis_writer.write(result)
+            if self.zmq_writer:
+                self.zmq_writer.write(result)
         except Exception as e:
             raise FatalError("Publish failed", context={"error": str(e)})

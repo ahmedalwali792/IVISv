@@ -20,7 +20,6 @@ Metric names (available across services):
 - Gauges:
 	- `fps_in`: approximate input fps (ingest if available).
 	- `fps_out`: output/display fps (UI sets this value).
-	- `redis_lag`: approximate Redis stream length / lag.
 
 Notes and usage:
 - Each service runs its own Prometheus HTTP endpoint (or integrates into existing web server for UI). Configure your Prometheus scrape targets to collect metrics from these endpoints.
@@ -33,32 +32,31 @@ Troubleshooting:
 
 # Runbook — IVISv (Production Defaults)
 
-Official bus: Redis Streams (production default)
+Official bus: ZeroMQ (contracts) + Shared Memory (frames)
 
-- Producer: ingestion publishes frames to Redis Streams via `XADD` to the stream `ivis:frames`.
-- Consumer (detection): uses `XREADGROUP` with consumer group `ivis:detection`.
-- UI: consumes frames and results from Redis Streams (`ivis:frames`, `ivis:results`) by default.
+- Producer: ingestion publishes frame contracts over ZeroMQ and writes frame bytes to SHM ring.
+- Consumer (detection): subscribes to contracts over ZeroMQ and reads frame bytes from SHM.
+- UI: subscribes to contracts/results over ZeroMQ and renders frames from SHM.
 
 Environment variables (important):
 
-- `REDIS_URL` — e.g. `redis://localhost:6379/0`
-- `REDIS_STREAM` — default `ivis:frames` (frames stream)
-- `REDIS_RESULTS_STREAM` — default `ivis:results` (results stream)
-- `REDIS_GROUP` — default `ivis:detection` (detection consumer group)
-- `REDIS_CONSUMER` — consumer id for XREADGROUP (default `detector-1`)
+- `ZMQ_PUB_ENDPOINT` — publisher endpoint for frame contracts (ingestion).
+- `ZMQ_SUB_ENDPOINT` — subscriber endpoint for frame contracts (detection/UI).
+- `ZMQ_RESULTS_PUB_ENDPOINT` — publisher endpoint for results (detection).
+- `ZMQ_RESULTS_SUB_ENDPOINT` — subscriber endpoint for results (UI/ingestion adaptive).
+- `SHM_CACHE_SECONDS` — how many seconds to keep in the SHM ring cache.
 
 Notes:
 
-- The system defaults to Redis Streams (`XADD`/`XREADGROUP`), which provides at-least-once delivery semantics and backpressure handling for production workloads.
-- Legacy transports (TCP socket, ZeroMQ proxy, Redis PubSub, dev HTTP memory server, etc.) have been moved to `ivis/legacy/` and are not part of the default path. They may still be used explicitly by setting `BUS_TRANSPORT` to a legacy value, but this is discouraged for production.
-- If a consumer group does not exist, the detection consumer will attempt to create it with `mkstream=True`.
+- The system defaults to ZeroMQ for contract delivery and SHM for frame bytes.
+- Legacy transports (TCP socket, dev-only proxies) remain under `ivis/legacy/` and are not part of the default path.
 
 Quick commands:
 
-Run system (default production mode — Redis Streams):
+Run system (default production mode — ZMQ + SHM):
 
 ```bash
-python run_system.py --source <rtsp-or-file> --redis-mode streams
+python run_system.py --source <rtsp-or-file>
 ```
 
 Start a single service (example: detection):

@@ -9,6 +9,7 @@ logger = setup_logging("detection")
 import ivis_metrics
 import ivis_tracing
 from ivis.common.time_utils import latency_ms, wall_clock_ms
+from ivis_health import ServiceState, HealthServer
 
 from detection.config import Config
 from detection.errors.fatal import FatalError, NonFatalError
@@ -57,6 +58,12 @@ def main():
     runtime = Runtime()
     logger.info("Config summary: %s", Config.summary())
 
+    health_host = os.getenv("HEALTH_BIND", "127.0.0.1")
+    health_port = int(os.getenv("DETECTION_HEALTH_PORT", "9002"))
+    state = ServiceState("detection")
+    HealthServer(state, host=health_host, port=health_port).start_in_thread()
+    state.set_check("config_loaded", True, details={"model": Config.MODEL_NAME, "bus_transport": Config.BUS_TRANSPORT})
+
     # initialize tracing (best-effort)
     try:
         ivis_tracing.init_tracer(service_name=os.getenv("OTEL_SERVICE_NAME", "detection"))
@@ -75,9 +82,19 @@ def main():
         model = load_model()
         runner = ModelRunner(model)
         runner.warmup()
+        state.set_check(
+            "model_loaded",
+            True,
+            details={"name": Config.MODEL_NAME, "path": Config.MODEL_PATH, "device": Config.MODEL_DEVICE, "img_size": Config.MODEL_IMG_SIZE},
+        )
 
         consumer = FrameConsumer()
+        consumer.connect()
+        state.set_check("bus_connected", True, details={"transport": Config.BUS_TRANSPORT, "endpoint": Config.ZMQ_SUB_ENDPOINT})
         reader = MemoryReader()
+        ok, details, err = reader.ensure_ring()
+        state.set_check("shm_ready", ok, details=details, reason=err)
+        state.compute_ready(["model_loaded", "bus_connected", "shm_ready"])
         decoder = FrameDecoder()
         publisher = ResultPublisher()
 
@@ -86,6 +103,23 @@ def main():
         for frame_contract in consumer:
             if not runtime.running:
                 break
+
+            state.touch_loop()
+            state.inc("contracts_received", 1)
+            state.set_check("bus_active", True)
+            state.set_meta("last_contract_ts", time.time())
+
+            if not state.get_check_ok("shm_ready"):
+                ok, details, err = reader.ensure_ring()
+                state.set_check("shm_ready", ok, details=details, reason=err)
+                state.compute_ready(["model_loaded", "bus_connected", "shm_ready"])
+                if not ok:
+                    metrics.inc_dropped_reason("shm_not_ready")
+                    _safe_metric(
+                        "metrics_frames_dropped_failed",
+                        lambda: ivis_metrics.frames_dropped_total.labels(reason="shm_not_ready").inc(),
+                    )
+                    continue
 
             metrics.inc_received()
             try:
@@ -130,8 +164,17 @@ def main():
                         raw_bytes = reader.read(frame_contract["memory"])
                     rr_ms = (time.time() - rr_start) * 1000.0
                     _safe_metric("metrics_shm_read_latency_failed", lambda: ivis_metrics.shm_read_latency_ms.observe(rr_ms))
-                except Exception:
+                except Exception as e:
+                    logger.debug("SHM read failed: %s", str(e))
                     raw_bytes = None
+
+                if raw_bytes is None:
+                    metrics.inc_dropped()
+                    _safe_metric(
+                        "metrics_frames_dropped_failed",
+                        lambda: ivis_metrics.frames_dropped_total.labels(reason="shm_read_failed").inc(),
+                    )
+                    continue
 
                 # decode + inference
                 frame = decoder.decode(raw_bytes, frame_contract)
@@ -143,6 +186,8 @@ def main():
                     try:
                         with ivis_tracing.start_span("detection.inference", {"frame_id": frame_id, "stream_id": stream_id}):
                             raw_results = runner.infer(frame)
+                        state.set_meta("last_infer_ts", time.time())
+                        state.inc("frames_inferred", 1)
                     except Exception as exc:
                         _record_issue("tracing_span_inference_failed", "Tracing span failed (inference)", exc)
                         raw_results = runner.infer(frame)
@@ -157,6 +202,9 @@ def main():
                 try:
                     with ivis_tracing.start_span("detection.publish", {"frame_id": frame_id, "stream_id": stream_id}):
                         publisher.publish(result)
+                    state.set_meta("last_publish_ts", time.time())
+                    state.inc("results_published", 1)
+                    state.compute_ready(["model_loaded", "bus_connected", "shm_ready"])
                 except Exception as exc:
                     _record_issue("tracing_span_publish_failed", "Tracing span failed (publish)", exc)
                     publisher.publish(result)
@@ -183,17 +231,20 @@ def main():
                 continue
 
             except FatalError as e:
+                state.set_error("fatal_error", e, context=getattr(e, "context", None))
+                state.set_ready(False)
                 metrics.fatal_crashes += 1
                 logger.error("FATAL ERROR: %s | Context: %s", getattr(e, 'message', str(e)), getattr(e, 'context', None))
                 raise e
 
             except Exception as e:
+                state.set_error("unhandled_exception", e, context={"frame_id": frame_contract.get("frame_id")})
                 _safe_metric(
                     "metrics_frames_dropped_failed",
                     lambda: ivis_metrics.frames_dropped_total.labels(reason="unhandled_exception").inc(),
                 )
-                logger.exception("Unhandled crash: %s", str(e))
-                raise FatalError(f"Unexpected: {e}")
+                logger.error("Unhandled error processing frame (dropped): %s", str(e), exc_info=True)
+                continue
 
     except FatalError:
         sys.exit(1)

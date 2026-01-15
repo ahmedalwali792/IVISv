@@ -4,7 +4,7 @@ V1 Invariants (Frozen)
 
 V1 يدعم Frame واحد فقط بهذه المواصفات الحصرية:
 
-Color Space: RGB
+Color Space: BGR (OpenCV native)
 
 Data Type: uint8
 
@@ -29,6 +29,13 @@ Multi-plane
 3. Versioning
 
 تغيير هذا السلوك يتطلب الانتقال إلى V2 وتغيير العقد بالكامل.
+
+Notes
+
+The frame contract includes explicit metadata:
+- frame_color_space: bgr
+- frame_dtype: uint8
+- frame_channels: 3
 
 Non-Contractual Components
 

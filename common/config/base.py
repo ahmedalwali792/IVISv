@@ -69,7 +69,7 @@ class EnvLoader:
         return values
 
 
-_REDACT_KEYS = {"POSTGRES_DSN", "REDIS_URL"}
+_REDACT_KEYS = {"POSTGRES_DSN"}
 _REDACT_HINTS = ("PASSWORD", "SECRET", "TOKEN", "DSN")
 
 

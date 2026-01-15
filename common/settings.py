@@ -39,6 +39,7 @@ class IngestionSettings(BaseSettings):
     shm_name: str = Field("ivis_shm_data")
     shm_meta_name: str = Field("ivis_shm_meta")
     shm_buffer_bytes: int = Field(50000000)
+    shm_cache_seconds: float = Field(30.0)
     target_fps: int = Field(15)
     video_loop: bool = Field(False)
 
@@ -53,16 +54,6 @@ class DetectionSettings(BaseSettings):
 class UISettings(BaseSettings):
     frame_width: int = Field(640)
     frame_height: int = Field(480)
-
-
-class RedisSettings(BaseSettings):
-    url: str = Field("redis://localhost:6379/0")
-    stream: str = Field("ivis:frames")
-    results_stream: str = Field("ivis:results")
-    mode: Literal["streams", "pubsub"] = Field("streams")
-    channel: str = Field("ivis:frames")
-    results_channel: str = Field("ivis:results")
-    
 
 
 class PostgresSettings(BaseSettings):
@@ -87,7 +78,6 @@ class Settings(BaseSettings):
     ingestion: IngestionSettings = IngestionSettings()
     detection: DetectionSettings = DetectionSettings()
     ui: UISettings = UISettings()
-    redis: RedisSettings = RedisSettings()
     postgres: PostgresSettings = PostgresSettings()
     logging: LoggingSettings = LoggingSettings()
     metrics: MetricsSettings = MetricsSettings()
@@ -121,14 +111,9 @@ class Settings(BaseSettings):
         env["SHM_NAME"] = self.ingestion.shm_name
         env["SHM_META_NAME"] = self.ingestion.shm_meta_name
         env["SHM_BUFFER_BYTES"] = str(self.ingestion.shm_buffer_bytes)
+        env["SHM_CACHE_SECONDS"] = str(self.ingestion.shm_cache_seconds)
         env["TARGET_FPS"] = str(self.ingestion.target_fps)
         env["VIDEO_LOOP"] = "1" if self.ingestion.video_loop else "0"
-        env["REDIS_URL"] = self.redis.url
-        env["REDIS_STREAM"] = self.redis.stream
-        env["REDIS_RESULTS_STREAM"] = self.redis.results_stream
-        env["REDIS_MODE"] = self.redis.mode
-        env["REDIS_CHANNEL"] = self.redis.channel
-        env["REDIS_RESULTS_CHANNEL"] = self.redis.results_channel
         return env
 
 

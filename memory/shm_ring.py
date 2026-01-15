@@ -233,47 +233,116 @@ class ShmRing:
         logger.debug("SHM write: data_name=%s slot=%s gen=%s bytes=%s", self.data_name, slot, gen, payload_len)
         return slot, gen
 
-    def read(self, slot: int, gen: int):
+    def read(self, slot: int, gen: int, retries: int = 3):
+        """
+        Reads data from the specified slot securely using optimistic concurrency control.
+        If the generation changes during the read (indicating a write occurred),
+        it retries up to `retries` times.
+        """
         start_ts = time.perf_counter()
         if slot < 0 or slot >= self.slot_count:
             return None
-        with self._mutex:
-            current = self._get_generation(slot)
-            if current != gen:
+
+        # Try to read, retry if torn
+        for _ in range(retries):
+            # 1. Pre-check: Verify generation matches request
+            # We don't need the mutex for reading if we use optimistic concurrency,
+            # but we use it here to ensure we don't read completely garbage pointers if resizing.
+            # However, for pure data consistency, the generation check is key.
+            # Ideally, we read without lock for speed, but Python's shm access is safe enough.
+            # We will use the mutex for metadata consistency but minimize holding it during copy if possible.
+            # CAUTION: For maximum speed we might avoid mutex during copy, but let's stick to
+            # the design: The mutex primarily protects metadata. The data buffer is just memory.
+            
+            with self._mutex:
+                current_before = self._get_generation(slot)
+            
+            if current_before != gen:
+                # Slot has already been overwritten before we started
                 logger.debug(
-                    "SHM read mismatch: data_name=%s slot=%s expected_gen=%s current_gen=%s",
-                    self.data_name,
+                    "SHM read miss (pre-check): slot=%s expected_gen=%s current_gen=%s",
                     slot,
                     gen,
-                    current,
+                    current_before,
                 )
                 return None
+
+            # 2. Copy data
+            # We calculate offsets. Note: The data might be changing RIGHT NOW.
             start = slot * self.slot_size
+            # We must read the payload length carefully.
+            # If payload length is being updated, we might get a wrong value.
+            # But the generation check after will catch this.
             payload_len = self._get_payload_length(slot)
             if payload_len <= 0 or payload_len > self.slot_size:
                 payload_len = self.slot_size
+            
             end = start + payload_len
+            # Validating bounds just in case
+            if end > len(self.data_buf):
+                # Should not happen if init is correct
+                return None
+                
+            # PERFORM THE COPY
+            # This is the critical section where a race can occur.
             data = bytes(self.data_buf[start:end])
-            logger.debug("SHM read: data_name=%s slot=%s gen=%s bytes=%s", self.data_name, slot, gen, len(data))
-            self._record_bytes(payload_len)
-            self._record_latency("shm_read_latency_ms", (time.perf_counter() - start_ts) * 1000.0)
-            return data
 
-    def read_latest(self):
+            # 3. Post-check: Verify generation hasn't changed
+            with self._mutex:
+                current_after = self._get_generation(slot)
+
+            if current_before == current_after:
+                # Success! Consistent read.
+                logger.debug("SHM read success: slot=%s gen=%s bytes=%s", slot, gen, len(data))
+                self._record_bytes(payload_len)
+                self._record_latency("shm_read_latency_ms", (time.perf_counter() - start_ts) * 1000.0)
+                return data
+            
+            # If we are here, a write happened during our read. Retry.
+            logger.debug("SHM torn read detected (retry): slot=%s gen=%s", slot, gen)
+            continue
+            
+        # If we exhausted retries, it means the writer is lapping us very fast.
+        return None
+
+    def read_latest(self, retries: int = 3):
+        """
+        Reads the latest written slot. Retries if the slot is overwritten during read.
+        """
         start_ts = time.perf_counter()
-        with self._mutex:
-            idx = (self._get_write_index() - 1) % self.slot_count
-            gen = self._get_generation(idx)
-            start = idx * self.slot_size
-            payload_len = self._get_payload_length(idx)
+        
+        for _ in range(retries):
+            with self._mutex:
+                # Find the latest written index
+                write_idx = self._get_write_index()
+                # The latest complete frame is at write_idx - 1
+                idx = (write_idx - 1) % self.slot_count
+                gen = self._get_generation(idx)
+                payload_len = self._get_payload_length(idx)
+
             if payload_len <= 0 or payload_len > self.slot_size:
                 payload_len = self.slot_size
+                
+            start = idx * self.slot_size
             end = start + payload_len
+
+            # buffer copy
             data = bytes(self.data_buf[start:end])
-            logger.debug("SHM read_latest: data_name=%s slot=%s gen=%s bytes=%s", self.data_name, idx, gen, len(data))
-            self._record_bytes(payload_len)
-            self._record_latency("shm_read_latency_ms", (time.perf_counter() - start_ts) * 1000.0)
-            return data, idx, gen
+
+            # Verify it's still the same frame
+            with self._mutex:
+                gen_after = self._get_generation(idx)
+            
+            if gen == gen_after:
+                logger.debug("SHM read_latest success: slot=%s gen=%s bytes=%s", idx, gen, len(data))
+                self._record_bytes(payload_len)
+                self._record_latency("shm_read_latency_ms", (time.perf_counter() - start_ts) * 1000.0)
+                return data, idx, gen
+            
+            # Retry
+            logger.debug("SHM read_latest torn read (retry)")
+        
+        return None, -1, 0
 
     def close(self):
         self.close_unlink(unlink=False)
