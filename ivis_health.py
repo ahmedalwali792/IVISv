@@ -3,6 +3,7 @@ import json
 import logging
 import threading
 import time
+import os
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional
@@ -23,6 +24,69 @@ class ServiceState:
 
         self.last_loop_ts: Optional[float] = None
         self.last_error: Optional[Dict[str, Any]] = None
+
+    def _calc_derived_checks(self) -> Dict[str, Dict[str, Any]]:
+        now = time.time()
+        derived = {}
+
+        # 1. loop_recent
+        max_idle = float(os.getenv("READY_MAX_IDLE_SEC", "5"))
+        if self.last_loop_ts:
+            age = now - self.last_loop_ts
+            ok = age <= max_idle
+            derived["loop_recent"] = {
+                "ok": ok,
+                "ts": now,
+                "reason": "idle_too_long" if not ok else None,
+                "details": {"age_sec": round(age, 3), "max_sec": max_idle}
+            }
+        else:
+             derived["loop_recent"] = {
+                "ok": False,
+                "ts": now,
+                "reason": "never_started",
+                "details": {}
+            }
+
+        # 2. bus_active_recent
+        bus_ok = True
+        reason = None
+        details = {}
+        
+        if self.service == "ingestion":
+            max_no_pub = float(os.getenv("READY_MAX_NO_PUBLISH_SEC", "10"))
+            last_pub = self.meta.get("last_publish_ts")
+            if last_pub:
+                age = now - float(last_pub)
+                if age > max_no_pub:
+                    bus_ok = False
+                    reason = "no_publish_recent"
+                details = {"age_sec": round(age, 3), "max_sec": max_no_pub}
+            else:
+                bus_ok = False
+                reason = "never_published"
+
+        elif self.service == "detection":
+            max_no_contract = float(os.getenv("READY_MAX_NO_CONTRACT_SEC", "10"))
+            last_contract = self.meta.get("last_contract_ts")
+            if last_contract:
+                age = now - float(last_contract)
+                if age > max_no_contract:
+                    bus_ok = False
+                    reason = "no_contract_recent"
+                details = {"age_sec": round(age, 3), "max_sec": max_no_contract}
+            else:
+                bus_ok = False
+                reason = "never_received_contract"
+        
+        derived["bus_active_recent"] = {
+            "ok": bus_ok,
+            "ts": now,
+            "reason": reason,
+            "details": details
+        }
+        
+        return derived
 
     def set_check(self, name: str, ok: bool, details: Optional[Dict[str, Any]] = None, reason: Optional[str] = None) -> None:
         with self._lock:
@@ -76,18 +140,34 @@ class ServiceState:
         with self._lock:
             self.last_error = payload
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self, include_debug: bool = False) -> Dict[str, Any]:
         with self._lock:
             uptime = max(0.0, time.time() - self.start_ts)
+            derived = self._calc_derived_checks()
+            
+            # Merit state = ready AND derived checks OK
+            runtime_ready = self.ready and derived["loop_recent"]["ok"] and derived["bus_active_recent"]["ok"]
+
+            # Merge derived checks into the main checks dict for visibility
+            all_checks = self.checks.copy()
+            all_checks.update(derived)
+
             return {
                 "service": self.service,
                 "uptime_sec": uptime,
-                "ready": self.ready,
-                "checks": self.checks,
+                "ready": runtime_ready,  # Computed runtime readiness
+                "config_ready": self.ready, # Original startup readiness
+                "checks": all_checks,
                 "counters": self.counters,
                 "meta": self.meta,
                 "last_loop_ts": self.last_loop_ts,
-                "last_error": self.last_error,
+                "meta": self.meta,
+                "last_loop_ts": self.last_loop_ts,
+                # Filter out traceback/full error details unless strictly requested (authenticated)
+                "last_error": self.last_error if include_debug else (
+                    {k: v for k, v in self.last_error.items() if k not in ("traceback", "context")} 
+                    if self.last_error else None
+                ),
             }
 
 
@@ -117,7 +197,18 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
             if self.path == "/state":
-                self._write_json(200, state.snapshot())
+                # Strict Token Check for /state
+                required_token = os.getenv("HEALTH_TOKEN")
+                if not required_token:
+                    self._write_json(403, {"error": "forbidden", "detail": "HEALTH_TOKEN not configured"})
+                    return
+                
+                auth_header = self.headers.get("X-IVIS-Health-Token")
+                if auth_header != required_token:
+                    self._write_json(403, {"error": "forbidden", "detail": "invalid token"})
+                    return
+
+                self._write_json(200, state.snapshot(include_debug=True))
                 return
 
             self._write_json(404, {"error": "not_found", "path": self.path})
@@ -134,6 +225,8 @@ class HealthServer:
         self.state = state
         self.host = host
         self.port = int(port)
+        if not os.getenv("HEALTH_TOKEN"):
+            logger.warning("SECURITY WARNING: HEALTH_TOKEN is not set. /state endpoint will be inaccessible.")
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 

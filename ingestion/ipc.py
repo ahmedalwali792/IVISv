@@ -84,6 +84,14 @@ class SocketPublisher:
         self._connect()
         return False
 
+    def close(self):
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception as exc:
+                _logger.debug("Error closing socket: %s", exc)
+            self.sock = None
+
 
 class ZmqPublisher:
     def __init__(self, config, endpoint: str):
@@ -124,6 +132,14 @@ class ZmqPublisher:
         except Exception as exc:
             _record_issue("zmq_send_failed", "ZMQ send failed", exc)
             return False
+
+    def close(self):
+        if self.socket:
+            try:
+                self.socket.close()
+            except Exception as exc:
+                _logger.debug("Error closing socket: %s", exc)
+            self.socket = None
 
 
 def _build_contract(

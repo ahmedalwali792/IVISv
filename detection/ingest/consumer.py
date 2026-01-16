@@ -3,6 +3,7 @@
 import json
 import socket
 import logging
+import os
 
 from detection.config import Config
 from detection.errors.fatal import FatalError
@@ -48,8 +49,17 @@ class TcpFrameConsumer:
             except Exception as e:
                 raise FatalError(f"Failed to connect to Bus at {self.address}", context={"error": str(e)})
 
+    def close(self):
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception as exc:
+                print(f"[DETECTION] Error closing TCP socket: {exc}")
+            self.sock = None
+
     def __iter__(self):
-        self.connect()
+        # Implicit connect removed; must call connect() explicitly from main.
+
         while True:
             try:
                 data = self.sock.recv(4096)
@@ -84,20 +94,60 @@ class ZmqFrameConsumer:
         self.socket = None
 
     def connect(self):
+        if self.socket:
+            return  # Idempotent: already connected
+
         ctx = self.zmq.Context.instance()
         self.socket = ctx.socket(self.zmq.SUB)
-        self.socket.connect(self.endpoint)
         self.socket.setsockopt(self.zmq.SUBSCRIBE, b"")
-        try:
-            self.socket.setsockopt(self.zmq.CONFLATE, 1)
-            print("[DETECTION] ZMQ CONFLATE enabled (processing latest frames only)")
-        except Exception:
-            print("[DETECTION] ZMQ CONFLATE not supported (ignoring)")
+        rcvhwm_env = os.getenv("ZMQ_RCVHWM")
+        if rcvhwm_env is not None:
+            try:
+                rcvhwm = int(rcvhwm_env)
+            except ValueError as exc:
+                _log_once("zmq_rcvhwm_invalid", "Invalid ZMQ_RCVHWM value (expected int)", exc)
+            else:
+                self.socket.setsockopt(self.zmq.RCVHWM, rcvhwm)
+        if Config.ZMQ_LINGER_MS:
+            self.socket.setsockopt(self.zmq.LINGER, Config.ZMQ_LINGER_MS)
+        
+        conflate_env = os.getenv("ZMQ_CONFLATE")
+        if conflate_env is not None:
+            conflate_value = conflate_env.strip().lower()
+            if conflate_value in ("1", "true", "yes", "on"):
+                try:
+                    self.socket.setsockopt(self.zmq.CONFLATE, 1)
+                    print("[DETECTION] ZMQ CONFLATE enabled (processing latest frames only)")
+                except Exception:
+                    print("[DETECTION] ZMQ CONFLATE not supported (ignoring)")
+            elif conflate_value not in ("0", "false", "no", "off", ""):
+                _log_once("zmq_conflate_invalid", "Invalid ZMQ_CONFLATE value (expected boolean)")
+        
+        self.socket.connect(self.endpoint)
         print(f"[DETECTION] ZMQ SUB connected to {self.endpoint}")
+
+    def reconnect(self, force=False):
+        if force:
+            self.close()
+        self.connect()
+
+
+    def close(self):
+        if self.socket:
+            try:
+                self.socket.setsockopt(self.zmq.LINGER, 0)
+                self.socket.close()
+            except Exception as exc:
+                print(f"[DETECTION] Error closing ZMQ socket: {exc}")
+            self.socket = None
+        # Note: We won't close ctx here as it might be shared or simply left for process exit
 
     def __iter__(self):
         if not self.socket:
-            self.connect()
+            # We strictly require explicit connect() now, but to avoid instant crash if forgotten,
+            # we raise a clear error or log warning. Given constraints, we'll raise fatal.
+            raise FatalError("ZMQ Consumer not connected. Call connect() before iterating.")
+
         while True:
             try:
                 payload = self.socket.recv()
@@ -123,8 +173,11 @@ class FrameConsumer:
 
     def connect(self):
         if hasattr(self._impl, "connect"):
-            return self._impl.connect()
-        return None
+            self._impl.connect()
+
+    def close(self):
+        if hasattr(self._impl, "close"):
+            self._impl.close()
 
     def __iter__(self):
         return iter(self._impl)

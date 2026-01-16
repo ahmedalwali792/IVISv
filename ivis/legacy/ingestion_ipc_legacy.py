@@ -52,6 +52,7 @@ class SocketPublisher:
         if self.sock:
             try:
                 self.sock.sendall(payload.encode())
+                return True
             except Exception:
                 print("[PUB] Transport lost. Dropping msg.")
                 self.sock.close()
@@ -94,6 +95,7 @@ class ZmqPublisher:
         )
         payload = json.dumps(contract).encode("utf-8")
         self.socket.send(payload)
+        return True
 
 
 def _build_contract(

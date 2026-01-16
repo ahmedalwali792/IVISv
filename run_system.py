@@ -107,7 +107,7 @@ class ServiceProcess:
             
             if self.restarts < self.max_restarts:
                 self.restarts += 1
-                wait_time = min(self.restarts * 2, 30)
+                wait_time = min(self.restarts * 2, 60)
                 logger.info(f"Restarting {self.name} in {wait_time}s (Attempt {self.restarts}/{self.max_restarts})")
                 self._close_files()
                 time.sleep(wait_time)
@@ -176,8 +176,9 @@ def _apply_env_map(target_env: dict, values: dict):
             continue
         target_env[key] = str(value)
 
-def _wait_ready(url: str, timeout_sec: float = 15.0) -> bool:
+def _wait_ready(service_name: str, url: str, timeout_sec: float = 15.0) -> bool:
     import urllib.request
+    import urllib.error
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         try:
@@ -187,6 +188,21 @@ def _wait_ready(url: str, timeout_sec: float = 15.0) -> bool:
         except Exception:
             pass
         time.sleep(0.5)
+    
+    # Diagnostics on failure
+    print(f"[{service_name}] Readiness check failed after {timeout_sec}s.")
+    state_url = url.replace("/ready", "/state")
+    try:
+        with urllib.request.urlopen(state_url, timeout=1.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            checks = data.get("checks", {})
+            print(f"[{service_name}] State Diagnostics:")
+            for k, v in checks.items():
+                if not v.get("ok"):
+                    print(f"  - {k}: FAILED | Reason: {v.get('reason')} | Details: {v.get('details')}")
+    except Exception as exc:
+        print(f"[{service_name}] Could not fetch diagnostics from {state_url}: {exc}")
+
     return False
 
 
@@ -385,9 +401,9 @@ def main(argv=None):
     ingestion_ready_url = f"http://{env_ingestion['HEALTH_BIND']}:{env_ingestion['INGESTION_HEALTH_PORT']}/ready"
     detection_ready_url = f"http://{env_detection['HEALTH_BIND']}:{env_detection['DETECTION_HEALTH_PORT']}/ready"
 
-    if not _wait_ready(ingestion_ready_url, 15.0):
+    if not _wait_ready("ingestion", ingestion_ready_url, 60.0):
         logger.warning("Ingestion not ready within timeout: %s", ingestion_ready_url)
-    if not _wait_ready(detection_ready_url, 20.0):
+    if not _wait_ready("detection", detection_ready_url, 120.0):
         logger.warning("Detection not ready within timeout: %s", detection_ready_url)
 
 

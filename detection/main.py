@@ -98,157 +98,202 @@ def main():
         decoder = FrameDecoder()
         publisher = ResultPublisher()
 
+        if hasattr(consumer, 'close'):
+            logger.info("Consumer has close() method")
+        if hasattr(publisher, 'close'):
+            logger.info("Publisher has close() method")
+
         logger.info(">>> Detection Loop Running <<<")
 
-        for frame_contract in consumer:
-            if not runtime.running:
-                break
+        try:
+            for frame_contract in consumer:
+                if not runtime.running:
+                    break
 
-            state.touch_loop()
-            state.inc("contracts_received", 1)
-            state.set_check("bus_active", True)
-            state.set_meta("last_contract_ts", time.time())
+                state.touch_loop()
+                # We stop manually computing ready state here, relying on ivis_health derived checks
+                # state.compute_ready(...) -> removed to avoid overriding derived checks
 
-            if not state.get_check_ok("shm_ready"):
-                ok, details, err = reader.ensure_ring()
-                state.set_check("shm_ready", ok, details=details, reason=err)
-                state.compute_ready(["model_loaded", "bus_connected", "shm_ready"])
-                if not ok:
-                    metrics.inc_dropped_reason("shm_not_ready")
-                    _safe_metric(
-                        "metrics_frames_dropped_failed",
-                        lambda: ivis_metrics.frames_dropped_total.labels(reason="shm_not_ready").inc(),
-                    )
-                    continue
+                state.inc("contracts_received", 1)
+                state.set_check("bus_active", True)
+                state.set_meta("last_contract_ts", time.time())
 
-            metrics.inc_received()
-            try:
-                # frames in
-                _safe_metric("metrics_frames_in_failed", ivis_metrics.frames_in_total.inc)
+                if not state.get_check_ok("shm_ready"):
+                    ok, details, err = reader.ensure_ring()
+                    state.set_check("shm_ready", ok, details=details, reason=err)
 
-                # contract validation
+                    # state.compute_ready(...) REMOVED
+                    if not ok:
+                        metrics.inc_dropped_reason("shm_not_ready")
+                        _safe_metric(
+                            "metrics_frames_dropped_failed",
+                            lambda: ivis_metrics.frames_dropped_total.labels(reason="shm_not_ready").inc(),
+                        )
+                        continue
+
+                metrics.inc_received()
                 try:
-                    validate_frame_contract_v1(frame_contract)
-                except ContractValidationError as exc:
-                    reason = getattr(exc, "reason_code", "validation_failed")
-                    metrics.inc_dropped_reason(reason)
-                    _safe_metric(
-                        "metrics_frames_dropped_failed",
-                        lambda: ivis_metrics.frames_dropped_total.labels(reason=reason).inc(),
-                    )
-                    logger.debug("Dropped frame due to contract validation: %s", getattr(exc, "message", str(exc)))
-                    continue
+                    # frames in
+                    _safe_metric("metrics_frames_in_failed", ivis_metrics.frames_in_total.inc)
 
-                # stale frame
-                if Config.MAX_FRAME_AGE_MS > 0:
-                    now_ms = wall_clock_ms()
-                    age_ms = latency_ms(now_ms, int(frame_contract.get("timestamp_ms", now_ms)))
-                    if age_ms > Config.MAX_FRAME_AGE_MS:
+                    # contract validation
+                    try:
+                        validate_frame_contract_v1(frame_contract)
+                    except ContractValidationError as exc:
+                        reason = getattr(exc, "reason_code", "validation_failed")
+                        metrics.inc_dropped_reason(reason)
+                        _safe_metric(
+                            "metrics_frames_dropped_failed",
+                            lambda: ivis_metrics.frames_dropped_total.labels(reason=reason).inc(),
+                        )
+                        logger.debug("Dropped frame due to contract validation: %s", getattr(exc, "message", str(exc)))
+                        continue
+
+                    # stale frame
+                    if Config.MAX_FRAME_AGE_MS > 0:
+                        now_ms = wall_clock_ms()
+                        age_ms = latency_ms(now_ms, int(frame_contract.get("timestamp_ms", now_ms)))
+                        if age_ms > Config.MAX_FRAME_AGE_MS:
+                            metrics.inc_dropped()
+                            _safe_metric(
+                                "metrics_frames_dropped_failed",
+                                lambda: ivis_metrics.frames_dropped_total.labels(reason="stale").inc(),
+                            )
+                            logger.debug("Dropped stale frame (age=%sms)", age_ms)
+                            continue
+
+                    # SHM read (observe)
+                    try:
+                        rr_start = time.time()
+                        # trace SHM read
+                        try:
+                            with ivis_tracing.start_span("detection.shm_read", {"frame_id": frame_contract.get("frame_id"), "stream_id": frame_contract.get("stream_id")}):
+                                raw_bytes = reader.read(frame_contract["memory"])
+                        except Exception as exc:
+                            _record_issue("tracing_span_shm_read_failed", "Tracing span failed (shm_read)", exc)
+                            raw_bytes = reader.read(frame_contract["memory"])
+                        rr_ms = (time.time() - rr_start) * 1000.0
+                        _safe_metric("metrics_shm_read_latency_failed", lambda: ivis_metrics.shm_read_latency_ms.observe(rr_ms))
+                    except Exception as e:
+                        logger.debug("SHM read failed: %s", str(e))
+                        raw_bytes = None
+
+                    if raw_bytes is None:
                         metrics.inc_dropped()
                         _safe_metric(
                             "metrics_frames_dropped_failed",
-                            lambda: ivis_metrics.frames_dropped_total.labels(reason="stale").inc(),
+                            lambda: ivis_metrics.frames_dropped_total.labels(reason="shm_read_failed").inc(),
                         )
-                        logger.debug("Dropped stale frame (age=%sms)", age_ms)
                         continue
 
-                # SHM read (observe)
-                try:
-                    rr_start = time.time()
-                    # trace SHM read
+                    # decode + inference
+                    frame = decoder.decode(raw_bytes, frame_contract)
+                    frame_id = frame_contract.get("frame_id")
+                    stream_id = frame_contract.get("stream_id")
                     try:
-                        with ivis_tracing.start_span("detection.shm_read", {"frame_id": frame_contract.get("frame_id"), "stream_id": frame_contract.get("stream_id")}):
-                            raw_bytes = reader.read(frame_contract["memory"])
-                    except Exception as exc:
-                        _record_issue("tracing_span_shm_read_failed", "Tracing span failed (shm_read)", exc)
-                        raw_bytes = reader.read(frame_contract["memory"])
-                    rr_ms = (time.time() - rr_start) * 1000.0
-                    _safe_metric("metrics_shm_read_latency_failed", lambda: ivis_metrics.shm_read_latency_ms.observe(rr_ms))
-                except Exception as e:
-                    logger.debug("SHM read failed: %s", str(e))
-                    raw_bytes = None
+                        inf_start = time.time()
+                        # inference span
+                        try:
+                            with ivis_tracing.start_span("detection.inference", {"frame_id": frame_id, "stream_id": stream_id}):
+                                raw_results = runner.infer(frame)
+                            state.set_meta("last_infer_ts", time.time())
+                            state.inc("frames_inferred", 1)
+                        except Exception as exc:
+                            _record_issue("tracing_span_inference_failed", "Tracing span failed (inference)", exc)
+                            raw_results = runner.infer(frame)
+                        inf_ms = (time.time() - inf_start) * 1000.0
+                        _safe_metric("metrics_inference_latency_failed", lambda: ivis_metrics.inference_latency_ms.observe(inf_ms))
+                    except Exception:
+                        raise
 
-                if raw_bytes is None:
+                    # publish
+                    result = parse_output(frame_contract, raw_results)
+                    # publish span
+                    published = False
+                    try:
+                        with ivis_tracing.start_span("detection.publish", {"frame_id": frame_id, "stream_id": stream_id}):
+                            publisher.publish(result)
+                            published = True
+                    except Exception as exc:
+                        _record_issue("tracing_span_publish_failed", "Tracing span failed (publish)", exc)
+                        if not published:
+                            publisher.publish(result)
+                            published = True
+                    if published:
+                        state.set_meta("last_publish_ts", time.time())
+                        state.inc("results_published", 1)
+                        # state.compute_ready(...) REMOVED
+                    _safe_metric("metrics_frames_out_failed", ivis_metrics.frames_out_total.inc)
+
+                    try:
+                        ts = frame_contract.get("timestamp_ms")
+                        if ts is not None:
+                            now_ms = wall_clock_ms()
+                            e2e = latency_ms(now_ms, int(ts))
+                            _safe_metric("metrics_end_to_end_latency_failed", lambda: ivis_metrics.end_to_end_latency_ms.observe(e2e))
+                    except Exception as exc:
+                        _record_issue("end_to_end_latency_failed", "End-to-end latency calculation failed", exc)
+
+                    metrics.inc_processed()
+
+                except NonFatalError as e:
                     metrics.inc_dropped()
                     _safe_metric(
                         "metrics_frames_dropped_failed",
-                        lambda: ivis_metrics.frames_dropped_total.labels(reason="shm_read_failed").inc(),
+                        lambda: ivis_metrics.frames_dropped_total.labels(reason="nonfatal").inc(),
                     )
+                    logger.debug("NonFatalError: %s", str(e))
                     continue
 
-                # decode + inference
-                frame = decoder.decode(raw_bytes, frame_contract)
-                frame_id = frame_contract.get("frame_id")
-                stream_id = frame_contract.get("stream_id")
-                try:
-                    inf_start = time.time()
-                    # inference span
-                    try:
-                        with ivis_tracing.start_span("detection.inference", {"frame_id": frame_id, "stream_id": stream_id}):
-                            raw_results = runner.infer(frame)
-                        state.set_meta("last_infer_ts", time.time())
-                        state.inc("frames_inferred", 1)
-                    except Exception as exc:
-                        _record_issue("tracing_span_inference_failed", "Tracing span failed (inference)", exc)
-                        raw_results = runner.infer(frame)
-                    inf_ms = (time.time() - inf_start) * 1000.0
-                    _safe_metric("metrics_inference_latency_failed", lambda: ivis_metrics.inference_latency_ms.observe(inf_ms))
-                except Exception:
-                    raise
+                except FatalError as e:
+                    state.set_error("fatal_error", e, context=getattr(e, "context", None))
+                    state.set_ready(False)
+                    metrics.fatal_crashes += 1
+                    logger.error("FATAL ERROR: %s | Context: %s", getattr(e, 'message', str(e)), getattr(e, 'context', None))
+                    raise e
 
-                # publish
-                result = parse_output(frame_contract, raw_results)
-                # publish span
-                try:
-                    with ivis_tracing.start_span("detection.publish", {"frame_id": frame_id, "stream_id": stream_id}):
-                        publisher.publish(result)
-                    state.set_meta("last_publish_ts", time.time())
-                    state.inc("results_published", 1)
-                    state.compute_ready(["model_loaded", "bus_connected", "shm_ready"])
-                except Exception as exc:
-                    _record_issue("tracing_span_publish_failed", "Tracing span failed (publish)", exc)
-                    publisher.publish(result)
-                _safe_metric("metrics_frames_out_failed", ivis_metrics.frames_out_total.inc)
+                except Exception as e:
+                    state.set_error("unhandled_exception", e, context={"frame_id": frame_contract.get("frame_id")})
+                    _safe_metric(
+                        "metrics_frames_dropped_failed",
+                        lambda: ivis_metrics.frames_dropped_total.labels(reason="unhandled_exception").inc(),
+                    )
+                    logger.error("Unhandled error processing frame (dropped): %s", str(e), exc_info=True)
+                    continue
 
-                try:
-                    ts = frame_contract.get("timestamp_ms")
-                    if ts is not None:
-                        now_ms = wall_clock_ms()
-                        e2e = latency_ms(now_ms, int(ts))
-                        _safe_metric("metrics_end_to_end_latency_failed", lambda: ivis_metrics.end_to_end_latency_ms.observe(e2e))
-                except Exception as exc:
-                    _record_issue("end_to_end_latency_failed", "End-to-end latency calculation failed", exc)
-
-                metrics.inc_processed()
-
-            except NonFatalError as e:
-                metrics.inc_dropped()
-                _safe_metric(
-                    "metrics_frames_dropped_failed",
-                    lambda: ivis_metrics.frames_dropped_total.labels(reason="nonfatal").inc(),
-                )
-                logger.debug("NonFatalError: %s", str(e))
-                continue
-
-            except FatalError as e:
-                state.set_error("fatal_error", e, context=getattr(e, "context", None))
-                state.set_ready(False)
-                metrics.fatal_crashes += 1
-                logger.error("FATAL ERROR: %s | Context: %s", getattr(e, 'message', str(e)), getattr(e, 'context', None))
-                raise e
-
-            except Exception as e:
-                state.set_error("unhandled_exception", e, context={"frame_id": frame_contract.get("frame_id")})
-                _safe_metric(
-                    "metrics_frames_dropped_failed",
-                    lambda: ivis_metrics.frames_dropped_total.labels(reason="unhandled_exception").inc(),
-                )
-                logger.error("Unhandled error processing frame (dropped): %s", str(e), exc_info=True)
-                continue
-
-    except FatalError:
+        finally:
+            pass
+    except FatalError as e:
+        logger.error("FATAL ERROR: %s", getattr(e, 'message', str(e)))
         sys.exit(1)
     except KeyboardInterrupt:
+        pass # Graceful exit
+    except Exception as e:
+        logger.critical("Unhandled exception during initialization: %s", str(e), exc_info=True)
+        sys.exit(1)
+    finally:
+        logger.info("Cleaning up resources...")
+        if 'consumer' in locals() and hasattr(consumer, 'close'):
+            try:
+                consumer.close()
+                logger.info("Consumer closed.")
+            except Exception as e:
+                logger.warning("Error closing consumer: %s", e)
+                
+        if 'publisher' in locals() and hasattr(publisher, 'close'):
+            try:
+                publisher.close()
+                logger.info("Publisher closed.")
+            except Exception as e:
+                logger.warning("Error closing publisher: %s", e)
+        if 'reader' in locals() and hasattr(reader, 'close'):
+            try:
+                reader.close()
+                logger.info("Reader closed.")
+            except Exception as e:
+                logger.warning("Error closing reader: %s", e)
+                
+        logger.info("Detection Service Stopped.")
         sys.exit(0)
 
 

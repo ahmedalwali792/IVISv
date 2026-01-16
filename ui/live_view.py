@@ -143,7 +143,7 @@ def _get_ring():
 
 def _overlay(frame_bgr: np.ndarray, result: dict, fps_value: float) -> np.ndarray:
     if not result.get("detections") and not result.get("tracks"):
-         logger.debug("Overlay: No detections/tracks in result for overlay")
+         pass # logger.debug("Overlay: No detections/tracks in result for overlay")
     timing = result.get("timing", {})
     inference_ms = timing.get("inference_ms")
     model_ms = timing.get("model_ms")
@@ -391,7 +391,7 @@ def _shm_fallback_loop():
             if not data:
                 time.sleep(0.1)
                 continue
-            logger.debug("SHM fallback read %s bytes", len(data))
+            # logger.debug("SHM fallback read %s bytes", len(data))
             arr = np.frombuffer(data, dtype=np.uint8)
             arr = arr.reshape((FRAME_HEIGHT, FRAME_WIDTH, 3))
             # Make writable copy for OpenCV drawing
@@ -463,7 +463,7 @@ def stream():
                         frame_bgr = arr.copy()
                         frame_bgr = np.ascontiguousarray(frame_bgr, dtype=np.uint8)
                         frame = _overlay(frame_bgr, last_result, fps_ema)
-                        logger.debug("Stream generated frame from SHM latest")
+                        # logger.debug("Stream generated frame from SHM latest")
                 except Exception:
                     logger.exception("Error generating frame from SHM in stream()")
                     frame = None

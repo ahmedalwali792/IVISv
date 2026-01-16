@@ -21,11 +21,17 @@ _SCHEMA = {
     "TRACKER_MAX_IOU": {"type": "float", "default": 0.7},
     "REID_MODEL_NAME": {"type": "str", "default": "osnet_x0_25"},
     "REID_MODEL_PATH": {"type": "str", "default": None},
-    "REID_ALLOW_FALLBACK": {"type": "bool", "default": False},
+    "REID_ALLOW_FALLBACK": {"type": "bool", "default": True},
     "BUS_TRANSPORT": {"type": "str", "default": "zmq"},
     "ZMQ_PUB_ENDPOINT": {"type": "str", "default": "tcp://localhost:5555"},
     "ZMQ_SUB_ENDPOINT": {"type": "str", "default": "tcp://localhost:5555"},
     "ZMQ_RESULTS_PUB_ENDPOINT": {"type": "str", "default": "tcp://localhost:5557"},
+    "ZMQ_CONFLATE": {"type": "bool", "default": False},
+    "ZMQ_RCVHWM": {"type": "int", "default": 1000},
+    "ZMQ_LINGER_MS": {"type": "int", "default": 0},
+    "DECODER_ALLOW_CONFIG_FALLBACK": {"type": "bool", "default": False},
+    "READY_MAX_IDLE_SEC": {"type": "int", "default": 30},
+    "READY_MAX_NO_CONTRACT_SEC": {"type": "int", "default": 10},
     "POSTGRES_DSN": {"type": "str", "default": None},
     "FRAME_WIDTH": {"type": "int", "default": 640},
     "FRAME_HEIGHT": {"type": "int", "default": 480},
@@ -83,6 +89,9 @@ class Config:
     ZMQ_PUB_ENDPOINT = _VALUES["ZMQ_PUB_ENDPOINT"]
     ZMQ_SUB_ENDPOINT = _VALUES["ZMQ_SUB_ENDPOINT"]
     ZMQ_RESULTS_PUB_ENDPOINT = _VALUES["ZMQ_RESULTS_PUB_ENDPOINT"]
+    ZMQ_CONFLATE = _VALUES["ZMQ_CONFLATE"]
+    ZMQ_RCVHWM = _VALUES["ZMQ_RCVHWM"]
+    ZMQ_LINGER_MS = _VALUES["ZMQ_LINGER_MS"]
 
     # Persistence
     POSTGRES_DSN = _VALUES["POSTGRES_DSN"]

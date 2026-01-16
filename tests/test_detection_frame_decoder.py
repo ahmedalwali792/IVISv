@@ -6,6 +6,8 @@ os.environ.setdefault("MODEL_VERSION", "0")
 os.environ.setdefault("MODEL_HASH", "stub")
 os.environ.setdefault("MODEL_PATH", "stub.pt")
 
+from detection.config import Config
+from detection.errors.fatal import NonFatalError
 from detection.frame.decoder import FrameDecoder  # noqa: E402
 import numpy as np
 
@@ -56,3 +58,29 @@ def test_decoder_rejects_wrong_size():
         assert False, "Expected size mismatch error"
     except Exception:
         assert True
+
+
+def test_decoder_missing_metadata_fails_in_strict_mode():
+    Config.DECODER_ALLOW_CONFIG_FALLBACK = False
+    dec = FrameDecoder()
+    # Contract missing geometry
+    contract = {"memory": {"size": 0}} # dummy
+    try:
+        dec._resolve_metadata(contract)
+        assert False, "Should fail in strict mode"
+    except NonFatalError:
+        assert True
+
+
+def test_decoder_missing_metadata_works_in_fallback_mode():
+    Config.DECODER_ALLOW_CONFIG_FALLBACK = True
+    # Ensure config has known defaults for test
+    Config.FRAME_WIDTH = 100
+    Config.FRAME_HEIGHT = 100
+    
+    dec = FrameDecoder()
+    contract = {"memory": {"size": 0}}
+    w, h, c, dt, fallback = dec._resolve_metadata(contract)
+    assert w == 100
+    assert h == 100
+    assert fallback is True

@@ -222,150 +222,161 @@ def main():
                 return True
         return False
 
-    while runtime.should_continue():
-        try:
-            state.touch_loop()
-            heartbeat.tick()
-
-            packet = reader.next_packet()
-
-            if packet is None:
-                if conf.video_loop and rtsp.is_file:
-                    logger.warning("Source EOF reached. Rewinding file input.")
-                    rtsp.rewind()
-                    # avoid tight rewind loop when VideoCapture doesn't
-                    # return frames immediately after seeking
-                    time.sleep(0.05)
-                    continue
-                if rtsp.is_file:
-                    raise FatalError("Source EOF or Connection Lost")
-                freeze_reason = frozen.check(monotonic_ms())
-                if freeze_reason:
-                    if not _attempt_reconnect(f"frozen_{freeze_reason}"):
-                        raise FatalError("Source reconnect failed")
-                else:
-                    time.sleep(0.05)
-                continue
-
-            reconnect.reset()
-
-            if packet.pts <= 0:
-                metrics.inc_dropped_pts()
-                continue
-
+    try:
+        while runtime.should_continue():
             try:
-                raw_frame = decoder.decode(packet)
-                # capture span: decoding/capture
+                state.touch_loop()
+                heartbeat.tick()
+
+                packet = reader.next_packet()
+
+                if packet is None:
+                    if conf.video_loop and rtsp.is_file:
+                        logger.warning("Source EOF reached. Rewinding file input.")
+                        rtsp.rewind()
+                        # avoid tight rewind loop when VideoCapture doesn't
+                        # return frames immediately after seeking
+                        time.sleep(0.05)
+                        continue
+                    if rtsp.is_file:
+                        raise FatalError("Source EOF or Connection Lost")
+                    freeze_reason = frozen.check(monotonic_ms())
+                    if freeze_reason:
+                        if not _attempt_reconnect(f"frozen_{freeze_reason}"):
+                            raise FatalError("Source reconnect failed")
+                    else:
+                        time.sleep(0.05)
+                    continue
+
+                reconnect.reset()
+
+                if packet.pts <= 0:
+                    metrics.inc_dropped_pts()
+                    continue
+
                 try:
-                    with ivis_tracing.start_span("ingestion.capture", {"stream_id": conf.stream_id}):
+                    raw_frame = decoder.decode(packet)
+                    # capture span: decoding/capture
+                    try:
+                        with ivis_tracing.start_span("ingestion.capture", {"stream_id": conf.stream_id}):
+                            pass
+                    except Exception as exc:
+                        _record_issue("tracing_span_capture_failed", "Tracing span failed (capture)", exc)
+                except Exception as exc:
+                    metrics.inc_dropped_corrupt()
+                    logger.debug("Decode error: %s", exc)
+                    continue
+                if raw_frame is None:
+                    metrics.inc_dropped_corrupt()
+                    continue
+                
+                metrics.inc_captured()
+                _safe_metric("metrics_frames_in_failed", ivis_metrics.frames_in_total.inc)
+
+                if not selector.allow(packet.pts):
+                    metrics.inc_dropped_fps()
+                    continue
+
+                clean_frame = normalizer.process(raw_frame)
+                if roi_mask is not None:
+                    clean_frame = apply_mask(clean_frame, roi_mask)
+                # normalization span
+                try:
+                    with ivis_tracing.start_span("ingestion.normalize", {"stream_id": conf.stream_id}):
                         pass
                 except Exception as exc:
-                    _record_issue("tracing_span_capture_failed", "Tracing span failed (capture)", exc)
-            except Exception as exc:
-                metrics.inc_dropped_corrupt()
-                logger.debug("Decode error: %s", exc)
-                continue
-            if raw_frame is None:
-                metrics.inc_dropped_corrupt()
-                continue
-            
-            metrics.inc_captured()
-            _safe_metric("metrics_frames_in_failed", ivis_metrics.frames_in_total.inc)
-
-            if not selector.allow(packet.pts):
-                metrics.inc_dropped_fps()
-                continue
-
-            clean_frame = normalizer.process(raw_frame)
-            if roi_mask is not None:
-                clean_frame = apply_mask(clean_frame, roi_mask)
-            # normalization span
-            try:
-                with ivis_tracing.start_span("ingestion.normalize", {"stream_id": conf.stream_id}):
-                    pass
-            except Exception as exc:
-                _record_issue("tracing_span_normalize_failed", "Tracing span failed (normalize)", exc)
-            fingerprint = anchor.generate(clean_frame)
-            frozen.note_frame(packet.pts, packet.timestamp_ms, fingerprint, packet.mono_ms)
-            freeze_reason = frozen.check(packet.mono_ms)
-            if freeze_reason and not rtsp.is_file:
-                if not _attempt_reconnect(f"frozen_{freeze_reason}"):
-                    raise FatalError("Source reconnect failed")
-                continue
-            identity = FrameIdentity(conf.stream_id, packet.pts, fingerprint)
-            if record_buffer is not None:
-                if record_buffer.add_frame(clean_frame, packet.timestamp_ms):
-                    _safe_metric("record_buffer_size_failed", lambda: ivis_metrics.record_buffer_size.set(record_buffer.size()))
-                    if record_buffer.drops > record_buffer_drops:
-                        _safe_metric(
-                            "record_buffer_drops_failed",
-                            lambda: ivis_metrics.record_buffer_drops.inc(record_buffer.drops - record_buffer_drops),
-                        )
-                        record_buffer_drops = record_buffer.drops
-            # Write to SHM
-            try:
-                # SHM write span
-                ref = None
+                    _record_issue("tracing_span_normalize_failed", "Tracing span failed (normalize)", exc)
+                fingerprint = anchor.generate(clean_frame)
+                frozen.note_frame(packet.pts, packet.timestamp_ms, fingerprint, packet.mono_ms)
+                freeze_reason = frozen.check(packet.mono_ms)
+                if freeze_reason and not rtsp.is_file:
+                    if not _attempt_reconnect(f"frozen_{freeze_reason}"):
+                        raise FatalError("Source reconnect failed")
+                    continue
+                identity = FrameIdentity(conf.stream_id, packet.pts, fingerprint)
+                if record_buffer is not None:
+                    if record_buffer.add_frame(clean_frame, packet.timestamp_ms):
+                        _safe_metric("record_buffer_size_failed", lambda: ivis_metrics.record_buffer_size.set(record_buffer.size()))
+                        if record_buffer.drops > record_buffer_drops:
+                            _safe_metric(
+                                "record_buffer_drops_failed",
+                                lambda: ivis_metrics.record_buffer_drops.inc(record_buffer.drops - record_buffer_drops),
+                            )
+                            record_buffer_drops = record_buffer.drops
+                # Write to SHM
                 try:
-                    with ivis_tracing.start_span("ingestion.shm_write", {"frame_id": identity.frame_id, "stream_id": identity.stream_id}):
+                    # SHM write span
+                    ref = None
+                    try:
+                        with ivis_tracing.start_span("ingestion.shm_write", {"frame_id": identity.frame_id, "stream_id": identity.stream_id}):
+                            ref = writer.write(clean_frame, identity)
+                    except Exception as exc:
+                        _record_issue("tracing_span_shm_write_failed", "Tracing span failed (shm_write)", exc)
+                        # fallback to direct write if tracing wrapper failed
                         ref = writer.write(clean_frame, identity)
+                except Exception:
+                    ref = None
+
+                if ref is not None:
+                    state.inc("frames_written", 1)
+                    state.set_meta("last_frame_id", identity.frame_id)
+                    state.set_meta("last_shm_write_ts", time.time())
+
+                # publish span
+                try:
+                    with ivis_tracing.start_span("ingestion.publish", {"frame_id": identity.frame_id, "stream_id": identity.stream_id}):
+                        published = publisher.publish(identity, packet.timestamp_ms, packet.mono_ms, ref, roi_meta=roi_meta)
                 except Exception as exc:
-                    _record_issue("tracing_span_shm_write_failed", "Tracing span failed (shm_write)", exc)
-                    # fallback to direct write if tracing wrapper failed
-                    ref = writer.write(clean_frame, identity)
-            except Exception:
-                ref = None
-
-            if ref is not None:
-                state.inc("frames_written", 1)
-                state.set_meta("last_frame_id", identity.frame_id)
-                state.set_meta("last_shm_write_ts", time.time())
-
-            # publish span
-            try:
-                with ivis_tracing.start_span("ingestion.publish", {"frame_id": identity.frame_id, "stream_id": identity.stream_id}):
+                    _record_issue("tracing_span_publish_failed", "Tracing span failed (publish)", exc)
+                    # if tracing wrapper fails, attempt publish anyway
                     published = publisher.publish(identity, packet.timestamp_ms, packet.mono_ms, ref, roi_meta=roi_meta)
-            except Exception as exc:
-                _record_issue("tracing_span_publish_failed", "Tracing span failed (publish)", exc)
-                # if tracing wrapper fails, attempt publish anyway
-                published = publisher.publish(identity, packet.timestamp_ms, packet.mono_ms, ref, roi_meta=roi_meta)
-            if not published:
-                state.set_check("bus_active", False, reason="publish_failed")
-                # Frame dropped due to backpressure/lag
-                metrics.inc_dropped_reason("lag")
-                _safe_metric("metrics_frames_dropped_failed", lambda: ivis_metrics.frames_dropped_total.labels(reason="lag").inc())
-                _safe_metric("metrics_drops_total_failed", lambda: ivis_metrics.drops_total.labels(reason="lag").inc())
-                logger.debug("Dropped frame due to backpressure/lag (stream length exceeded)")
-            else:
-                state.inc("frames_published", 1)
-                state.set_check("bus_active", True)
-                state.set_meta("last_publish_ts", time.time())
-                metrics.inc_processed()
-                _safe_metric("metrics_frames_out_failed", ivis_metrics.frames_out_total.inc)
-            # end-to-end: best-effort observe latency from capture timestamp to now
-            try:
-                if packet.timestamp_ms:
-                    now_ms = wall_clock_ms()
-                    end_ms = latency_ms(now_ms, int(packet.timestamp_ms))
-                    _safe_metric("metrics_end_to_end_latency_failed", lambda: ivis_metrics.end_to_end_latency_ms.observe(end_ms))
-            except Exception as exc:
-                _record_issue("end_to_end_latency_failed", "End-to-end latency calculation failed", exc)
-            # No external lag source when running without a broker
-            _safe_metric("metrics_adaptive_fps_failed", lambda: ivis_metrics.adaptive_fps_current.set(selector.target_fps))
+                if not published:
+                    state.set_check("bus_active", False, reason="publish_failed")
+                    # Frame dropped due to backpressure/lag
+                    metrics.inc_dropped_reason("lag")
+                    _safe_metric("metrics_frames_dropped_failed", lambda: ivis_metrics.frames_dropped_total.labels(reason="lag").inc())
+                    _safe_metric("metrics_drops_total_failed", lambda: ivis_metrics.drops_total.labels(reason="lag").inc())
+                    logger.debug("Dropped frame due to backpressure/lag (stream length exceeded)")
+                else:
+                    state.inc("frames_published", 1)
+                    state.set_check("bus_active", True)
+                    state.set_meta("last_publish_ts", time.time())
+                    metrics.inc_processed()
+                    _safe_metric("metrics_frames_out_failed", ivis_metrics.frames_out_total.inc)
+                # end-to-end: best-effort observe latency from capture timestamp to now
+                try:
+                    if packet.timestamp_ms:
+                        now_ms = wall_clock_ms()
+                        end_ms = latency_ms(now_ms, int(packet.timestamp_ms))
+                        _safe_metric("metrics_end_to_end_latency_failed", lambda: ivis_metrics.end_to_end_latency_ms.observe(end_ms))
+                except Exception as exc:
+                    _record_issue("end_to_end_latency_failed", "End-to-end latency calculation failed", exc)
+                # No external lag source when running without a broker
+                _safe_metric("metrics_adaptive_fps_failed", lambda: ivis_metrics.adaptive_fps_current.set(selector.target_fps))
         
-        except FatalError as e:
-            state.set_error("fatal_error", e, context=getattr(e, "context", None))
-            state.set_ready(False)
-            logger.error("!!! FATAL ERROR !!! %s | Context: %s", getattr(e, 'message', str(e)), getattr(e, 'context', None))
-            break
+            except FatalError as e:
+                state.set_error("fatal_error", e, context=getattr(e, "context", None))
+                state.set_ready(False)
+                logger.error("!!! FATAL ERROR !!! %s | Context: %s", getattr(e, 'message', str(e)), getattr(e, 'context', None))
+                break
 
+            except Exception as e:
+                logger.exception("!!! UNHANDLED CRASH !!! %s", str(e))
+                break
+
+    finally:
+        logger.info("Cleaning up resources...")
+        rtsp.close()
+        try:
+            if 'publisher' in locals() and hasattr(publisher, 'close'):
+                publisher.close()
+                logger.info("Publisher closed.")
         except Exception as e:
-            logger.exception("!!! UNHANDLED CRASH !!! %s", str(e))
-            break
-
-    rtsp.close()
-    runtime.shutdown()
-    sys.exit(1)
+            logger.warning("Error closing publisher: %s", e)
+        
+        runtime.shutdown()
+        logger.info("Ingestion Service Stopped.")
+        sys.exit(0) # clean exit
 
 if __name__ == "__main__":
     main()

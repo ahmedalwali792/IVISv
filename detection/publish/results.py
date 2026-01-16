@@ -55,6 +55,14 @@ class PostgresWriter:
                 ),
             )
 
+    def close(self):
+        if self.conn:
+            try:
+                self.conn.close()
+            except Exception as exc:
+                print(f"[DETECTION] Error closing Postgres connection: {exc}")
+            self.conn = None
+
 
 class ZmqResultWriter:
     def __init__(self, endpoint: str):
@@ -65,6 +73,7 @@ class ZmqResultWriter:
         self.zmq = zmq
         self.endpoint = endpoint
         self.socket = self.zmq.Context.instance().socket(self.zmq.PUB)
+        self.socket.setsockopt(self.zmq.LINGER, Config.ZMQ_LINGER_MS)
         self.socket.bind(self.endpoint)
 
     def write(self, result: dict):
@@ -75,6 +84,15 @@ class ZmqResultWriter:
             import logging
             logging.getLogger("detection").error("ZMQ results publish failed: %s", exc)
             return
+
+    def close(self):
+        if self.socket:
+            try:
+                self.socket.close()
+            except Exception as exc:
+                import logging
+                logging.getLogger("detection").debug("Error closing ZMQ socket: %s", exc)
+            self.socket = None
 
 
 class ResultPublisher:
@@ -128,3 +146,15 @@ class ResultPublisher:
                 self.zmq_writer.write(result)
         except Exception as e:
             raise FatalError("Publish failed", context={"error": str(e)})
+
+    def close(self):
+        if self.zmq_writer:
+            try:
+                self.zmq_writer.close()
+            except Exception as exc:
+                self.logger.debug("Error closing ZMQ writer: %s", exc)
+        if self.pg_writer:
+            try:
+                self.pg_writer.close()
+            except Exception as exc:
+                self.logger.debug("Error closing Postgres writer: %s", exc)

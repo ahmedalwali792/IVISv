@@ -51,6 +51,16 @@ class MemoryReader:
             self._ring = None
             return False, {}, str(exc)
 
+    def close(self):
+        if self._ring is None:
+            return
+        try:
+            self._ring.close()
+        except Exception:
+            pass
+        self._ring = None
+        self._ring_info = {}
+
     def read(self, memory_ref: dict) -> bytes:
         key = memory_ref.get("key")
         if not key:

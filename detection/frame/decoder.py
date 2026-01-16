@@ -24,7 +24,11 @@ class FrameDecoder:
         if all(v is not None for v in (width, height, channels, dtype)):
             return int(width), int(height), int(channels), str(dtype), False
 
-        self._logger.warning("Contract missing frame metadata. Falling back to Config.")
+        if not Config.DECODER_ALLOW_CONFIG_FALLBACK:
+            raise NonFatalError("Missing frame metadata in contract (Strict Mode). Enable DECODER_ALLOW_CONFIG_FALLBACK to bypass.")
+
+        # Rate-limiter for warnings could be added here if desired, using a static set or similar.
+        self._logger.warning("Contract missing frame metadata. Falling back to Config (DECODER_ALLOW_CONFIG_FALLBACK=True).")
         return Config.FRAME_WIDTH, Config.FRAME_HEIGHT, 3, "uint8", True
 
     def _dtype_bytes(self, dtype: str) -> int:

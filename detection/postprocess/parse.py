@@ -38,6 +38,23 @@ def _track_bbox_xyxy(track: dict):
     return None
 
 
+def _track_is_confirmed(track: dict) -> bool:
+    if "confirmed" in track:
+        return bool(track.get("confirmed"))
+    if "is_confirmed" in track:
+        return bool(track.get("is_confirmed"))
+    return True
+
+
+def _track_is_recent(track: dict) -> bool:
+    if "time_since_update" not in track:
+        return True
+    try:
+        return float(track.get("time_since_update", 0)) <= 1
+    except Exception:
+        return False
+
+
 def parse_output(frame_contract: dict, raw_results: dict):
     """Construct ResultContractV1 from frame contract and raw model/tracker outputs.
 
@@ -51,12 +68,19 @@ def parse_output(frame_contract: dict, raw_results: dict):
 
     tracks = []
     for t in raw_tracks:
+        if not _track_is_confirmed(t):
+            continue
+        if not _track_is_recent(t):
+            continue
+        track_id = t.get("track_id")
+        if track_id is None:
+            continue
         tb = _track_bbox_xyxy(t)
         if tb is not None:
-            tracks.append((t, tb))
+            tracks.append((track_id, tb))
 
     dets = []
-    unused = set(range(len(tracks)))
+    # unused = set(range(len(tracks))) # Removed in global matching
     for det in raw_dets:
         try:
             (x1, y1, x2, y2), conf, cls_id = det
@@ -67,20 +91,35 @@ def parse_output(frame_contract: dict, raw_results: dict):
             "conf": float(conf),
             "class_id": int(cls_id),
         }
-        best_idx = None
-        best_iou = 0.0
-        for idx in list(unused):
-            _, tb = tracks[idx]
-            iou = _iou(entry["bbox"], tb)
-            if iou > best_iou:
-                best_iou = iou
-                best_idx = idx
-        if best_idx is not None and best_iou >= 0.3:
-            track_id = tracks[best_idx][0].get("track_id")
-            if track_id is not None:
-                entry["track_id"] = track_id
-            unused.discard(best_idx)
+        # Greedy logic removed. Just valid detections list first.
         dets.append(entry)
+
+    # Global 1-to-1 matching
+    matches = []
+    for d_idx, det_entry in enumerate(dets):
+        det_bbox = det_entry["bbox"]
+        for track_id, t_bbox in tracks:
+            try:
+                iou = _iou(det_bbox, t_bbox)
+            except Exception:
+                iou = 0.0
+            
+            if iou >= 0.3:
+                 # Tie-break: IoU desc, track_id asc, det_idx asc
+                 matches.append((iou, track_id, d_idx))
+    
+    # Sort matches: higher IoU first.
+    matches.sort(key=lambda x: (-x[0], x[1], x[2]))
+
+    used_tracks = set()
+    used_dets = set()
+    for _, track_id, d_idx in matches:
+        if track_id in used_tracks or d_idx in used_dets:
+            continue
+        
+        dets[d_idx]["track_id"] = track_id
+        used_tracks.add(track_id)
+        used_dets.add(d_idx)
 
     result = {
         "contract_version": 1,
