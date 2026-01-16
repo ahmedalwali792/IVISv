@@ -16,3 +16,7 @@ build/
 # Byte-compiled / other
 *.py[cod]
 *$py.class
+__pycache__/
+*.pyc
+logs/
+.vscode/
